@@ -1,0 +1,477 @@
+package turntf
+
+import (
+	"fmt"
+
+	pb "github.com/tursom/turntf-go/internal/proto"
+)
+
+type Credentials struct {
+	NodeID   int64
+	UserID   int64
+	Password string
+}
+
+type UserRef struct {
+	NodeID int64 `json:"node_id"`
+	UserID int64 `json:"user_id"`
+}
+
+type User struct {
+	NodeID         int64  `json:"node_id"`
+	UserID         int64  `json:"user_id"`
+	Username       string `json:"username"`
+	Role           string `json:"role"`
+	ProfileJSON    []byte `json:"profile_json,omitempty"`
+	SystemReserved bool   `json:"system_reserved"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
+	OriginNodeID   int64  `json:"origin_node_id"`
+}
+
+type MessageCursor struct {
+	NodeID int64 `json:"node_id"`
+	Seq    int64 `json:"seq"`
+}
+
+type DeliveryMode string
+
+const (
+	DeliveryModeUnspecified DeliveryMode = ""
+	DeliveryModeBestEffort  DeliveryMode = "best_effort"
+	DeliveryModeRouteRetry  DeliveryMode = "route_retry"
+)
+
+type Message struct {
+	UserNodeID   int64  `json:"user_node_id"`
+	UserID       int64  `json:"user_id"`
+	NodeID       int64  `json:"node_id"`
+	Seq          int64  `json:"seq"`
+	Sender       string `json:"sender"`
+	Body         []byte `json:"body"`
+	CreatedAtHLC string `json:"created_at_hlc"`
+}
+
+type Packet struct {
+	PacketID     uint64       `json:"packet_id"`
+	SourceNodeID int64        `json:"source_node_id"`
+	TargetNodeID int64        `json:"target_node_id"`
+	Recipient    UserRef      `json:"recipient"`
+	Sender       string       `json:"sender"`
+	Body         []byte       `json:"body"`
+	DeliveryMode DeliveryMode `json:"delivery_mode"`
+}
+
+type RelayAccepted struct {
+	PacketID     uint64       `json:"packet_id"`
+	SourceNodeID int64        `json:"source_node_id"`
+	TargetNodeID int64        `json:"target_node_id"`
+	Recipient    UserRef      `json:"recipient"`
+	DeliveryMode DeliveryMode `json:"delivery_mode"`
+}
+
+type Subscription struct {
+	SubscriberNodeID int64  `json:"subscriber_node_id"`
+	SubscriberUserID int64  `json:"subscriber_user_id"`
+	ChannelNodeID    int64  `json:"channel_node_id"`
+	ChannelUserID    int64  `json:"channel_user_id"`
+	SubscribedAt     string `json:"subscribed_at,omitempty"`
+	DeletedAt        string `json:"deleted_at,omitempty"`
+	OriginNodeID     int64  `json:"origin_node_id"`
+}
+
+type Event struct {
+	Sequence        int64  `json:"sequence"`
+	EventID         int64  `json:"event_id"`
+	EventType       string `json:"event_type"`
+	Aggregate       string `json:"aggregate"`
+	AggregateNodeID int64  `json:"aggregate_node_id"`
+	AggregateID     int64  `json:"aggregate_id"`
+	HLC             string `json:"hlc,omitempty"`
+	OriginNodeID    int64  `json:"origin_node_id"`
+	EventJSON       []byte `json:"event_json,omitempty"`
+}
+
+type MessageTrimStatus struct {
+	TrimmedTotal  int64  `json:"trimmed_total"`
+	LastTrimmedAt string `json:"last_trimmed_at,omitempty"`
+}
+
+type ProjectionStatus struct {
+	PendingTotal int64  `json:"pending_total"`
+	LastFailedAt string `json:"last_failed_at,omitempty"`
+}
+
+type PeerOriginStatus struct {
+	OriginNodeID      int64  `json:"origin_node_id"`
+	AckedEventID      int64  `json:"acked_event_id"`
+	AppliedEventID    int64  `json:"applied_event_id"`
+	UnconfirmedEvents int64  `json:"unconfirmed_events"`
+	CursorUpdatedAt   string `json:"cursor_updated_at,omitempty"`
+	RemoteLastEventID uint64 `json:"remote_last_event_id"`
+	PendingCatchup    bool   `json:"pending_catchup"`
+}
+
+type PeerStatus struct {
+	NodeID                    int64              `json:"node_id"`
+	ConfiguredURL             string             `json:"configured_url,omitempty"`
+	Connected                 bool               `json:"connected"`
+	SessionDirection          string             `json:"session_direction,omitempty"`
+	Origins                   []PeerOriginStatus `json:"origins,omitempty"`
+	PendingSnapshotPartitions int32              `json:"pending_snapshot_partitions"`
+	RemoteSnapshotVersion     string             `json:"remote_snapshot_version,omitempty"`
+	RemoteMessageWindowSize   int32              `json:"remote_message_window_size"`
+	ClockOffsetMS             int64              `json:"clock_offset_ms"`
+	LastClockSync             string             `json:"last_clock_sync,omitempty"`
+	SnapshotDigestsSentTotal  uint64             `json:"snapshot_digests_sent_total"`
+	SnapshotDigestsRecvTotal  uint64             `json:"snapshot_digests_received_total"`
+	SnapshotChunksSentTotal   uint64             `json:"snapshot_chunks_sent_total"`
+	SnapshotChunksRecvTotal   uint64             `json:"snapshot_chunks_received_total"`
+	LastSnapshotDigestAt      string             `json:"last_snapshot_digest_at,omitempty"`
+	LastSnapshotChunkAt       string             `json:"last_snapshot_chunk_at,omitempty"`
+}
+
+type OperationsStatus struct {
+	NodeID            int64             `json:"node_id"`
+	MessageWindowSize int32             `json:"message_window_size"`
+	LastEventSequence int64             `json:"last_event_sequence"`
+	WriteGateReady    bool              `json:"write_gate_ready"`
+	ConflictTotal     int64             `json:"conflict_total"`
+	MessageTrim       MessageTrimStatus `json:"message_trim"`
+	Projection        ProjectionStatus  `json:"projection"`
+	Peers             []PeerStatus      `json:"peers,omitempty"`
+}
+
+type DeleteUserResult struct {
+	Status string `json:"status"`
+	NodeID int64  `json:"node_id"`
+	UserID int64  `json:"user_id"`
+}
+
+type LoginInfo struct {
+	User            User
+	ProtocolVersion string
+}
+
+type SendMessageInput struct {
+	Target UserRef
+	Sender string
+	Body   []byte
+}
+
+type SendPacketInput struct {
+	Target       UserRef
+	Sender       string
+	Body         []byte
+	DeliveryMode DeliveryMode
+}
+
+type CreateUserRequest struct {
+	Username    string `json:"username"`
+	Password    string `json:"password,omitempty"`
+	ProfileJSON []byte `json:"profile_json,omitempty"`
+	Role        string `json:"role"`
+}
+
+type UpdateUserRequest struct {
+	Username    *string `json:"username,omitempty"`
+	Password    *string `json:"password,omitempty"`
+	ProfileJSON *[]byte `json:"profile_json,omitempty"`
+	Role        *string `json:"role,omitempty"`
+}
+
+func (m Message) Cursor() MessageCursor {
+	return MessageCursor{NodeID: m.NodeID, Seq: m.Seq}
+}
+
+func (r UserRef) validate() error {
+	if r.NodeID == 0 {
+		return fmt.Errorf("node_id is required")
+	}
+	if r.UserID == 0 {
+		return fmt.Errorf("user_id is required")
+	}
+	return nil
+}
+
+func (m DeliveryMode) validatePacketMode() error {
+	switch m {
+	case DeliveryModeBestEffort, DeliveryModeRouteRetry:
+		return nil
+	default:
+		return fmt.Errorf("invalid delivery_mode %q", m)
+	}
+}
+
+func deliveryModeToProto(mode DeliveryMode) pb.ClientDeliveryMode {
+	switch mode {
+	case DeliveryModeBestEffort:
+		return pb.ClientDeliveryMode_CLIENT_DELIVERY_MODE_BEST_EFFORT
+	case DeliveryModeRouteRetry:
+		return pb.ClientDeliveryMode_CLIENT_DELIVERY_MODE_ROUTE_RETRY
+	default:
+		return pb.ClientDeliveryMode_CLIENT_DELIVERY_MODE_UNSPECIFIED
+	}
+}
+
+func deliveryModeFromProto(mode pb.ClientDeliveryMode) DeliveryMode {
+	switch mode {
+	case pb.ClientDeliveryMode_CLIENT_DELIVERY_MODE_BEST_EFFORT:
+		return DeliveryModeBestEffort
+	case pb.ClientDeliveryMode_CLIENT_DELIVERY_MODE_ROUTE_RETRY:
+		return DeliveryModeRouteRetry
+	default:
+		return DeliveryModeUnspecified
+	}
+}
+
+func userRefToProto(in UserRef) *pb.UserRef {
+	return &pb.UserRef{
+		NodeId: in.NodeID,
+		UserId: in.UserID,
+	}
+}
+
+func userRefFromProto(in *pb.UserRef) UserRef {
+	if in == nil {
+		return UserRef{}
+	}
+	return UserRef{
+		NodeID: in.NodeId,
+		UserID: in.UserId,
+	}
+}
+
+func userFromProto(in *pb.User) User {
+	if in == nil {
+		return User{}
+	}
+	return User{
+		NodeID:         in.NodeId,
+		UserID:         in.UserId,
+		Username:       in.Username,
+		Role:           in.Role,
+		ProfileJSON:    append([]byte(nil), in.ProfileJson...),
+		SystemReserved: in.SystemReserved,
+		CreatedAt:      in.CreatedAt,
+		UpdatedAt:      in.UpdatedAt,
+		OriginNodeID:   in.OriginNodeId,
+	}
+}
+
+func cursorToProto(in MessageCursor) *pb.MessageCursor {
+	return &pb.MessageCursor{
+		NodeId: in.NodeID,
+		Seq:    in.Seq,
+	}
+}
+
+func cursorFromProto(in *pb.MessageCursor) MessageCursor {
+	if in == nil {
+		return MessageCursor{}
+	}
+	return MessageCursor{
+		NodeID: in.NodeId,
+		Seq:    in.Seq,
+	}
+}
+
+func messageFromProto(in *pb.Message) Message {
+	if in == nil {
+		return Message{}
+	}
+	return Message{
+		UserNodeID:   in.UserNodeId,
+		UserID:       in.UserId,
+		NodeID:       in.NodeId,
+		Seq:          in.Seq,
+		Sender:       in.Sender,
+		Body:         append([]byte(nil), in.Body...),
+		CreatedAtHLC: in.CreatedAtHlc,
+	}
+}
+
+func packetFromProto(in *pb.Packet) Packet {
+	if in == nil {
+		return Packet{}
+	}
+	return Packet{
+		PacketID:     in.PacketId,
+		SourceNodeID: in.SourceNodeId,
+		TargetNodeID: in.TargetNodeId,
+		Recipient:    userRefFromProto(in.Recipient),
+		Sender:       in.Sender,
+		Body:         append([]byte(nil), in.Body...),
+		DeliveryMode: deliveryModeFromProto(in.DeliveryMode),
+	}
+}
+
+func relayAcceptedFromProto(in *pb.TransientAccepted) RelayAccepted {
+	if in == nil {
+		return RelayAccepted{}
+	}
+	return RelayAccepted{
+		PacketID:     in.PacketId,
+		SourceNodeID: in.SourceNodeId,
+		TargetNodeID: in.TargetNodeId,
+		Recipient:    userRefFromProto(in.Recipient),
+		DeliveryMode: deliveryModeFromProto(in.DeliveryMode),
+	}
+}
+
+func subscriptionFromProto(in *pb.Subscription) Subscription {
+	if in == nil {
+		return Subscription{}
+	}
+	return Subscription{
+		SubscriberNodeID: in.SubscriberNodeId,
+		SubscriberUserID: in.SubscriberUserId,
+		ChannelNodeID:    in.ChannelNodeId,
+		ChannelUserID:    in.ChannelUserId,
+		SubscribedAt:     in.SubscribedAt,
+		DeletedAt:        in.DeletedAt,
+		OriginNodeID:     in.OriginNodeId,
+	}
+}
+
+func eventFromProto(in *pb.Event) Event {
+	if in == nil {
+		return Event{}
+	}
+	return Event{
+		Sequence:        in.Sequence,
+		EventID:         in.EventId,
+		EventType:       in.EventType,
+		Aggregate:       in.Aggregate,
+		AggregateNodeID: in.AggregateNodeId,
+		AggregateID:     in.AggregateId,
+		HLC:             in.Hlc,
+		OriginNodeID:    in.OriginNodeId,
+		EventJSON:       append([]byte(nil), in.EventJson...),
+	}
+}
+
+func operationsStatusFromProto(in *pb.OperationsStatus) OperationsStatus {
+	if in == nil {
+		return OperationsStatus{}
+	}
+
+	peers := make([]PeerStatus, 0, len(in.Peers))
+	for _, peer := range in.Peers {
+		peers = append(peers, peerStatusFromProto(peer))
+	}
+
+	return OperationsStatus{
+		NodeID:            in.NodeId,
+		MessageWindowSize: in.MessageWindowSize,
+		LastEventSequence: in.LastEventSequence,
+		WriteGateReady:    in.WriteGateReady,
+		ConflictTotal:     in.ConflictTotal,
+		MessageTrim:       messageTrimStatusFromProto(in.MessageTrim),
+		Projection:        projectionStatusFromProto(in.Projection),
+		Peers:             peers,
+	}
+}
+
+func messageTrimStatusFromProto(in *pb.MessageTrimStatus) MessageTrimStatus {
+	if in == nil {
+		return MessageTrimStatus{}
+	}
+	return MessageTrimStatus{
+		TrimmedTotal:  in.TrimmedTotal,
+		LastTrimmedAt: in.LastTrimmedAt,
+	}
+}
+
+func projectionStatusFromProto(in *pb.ProjectionStatus) ProjectionStatus {
+	if in == nil {
+		return ProjectionStatus{}
+	}
+	return ProjectionStatus{
+		PendingTotal: in.PendingTotal,
+		LastFailedAt: in.LastFailedAt,
+	}
+}
+
+func peerOriginStatusFromProto(in *pb.PeerOriginStatus) PeerOriginStatus {
+	if in == nil {
+		return PeerOriginStatus{}
+	}
+	return PeerOriginStatus{
+		OriginNodeID:      in.OriginNodeId,
+		AckedEventID:      in.AckedEventId,
+		AppliedEventID:    in.AppliedEventId,
+		UnconfirmedEvents: in.UnconfirmedEvents,
+		CursorUpdatedAt:   in.CursorUpdatedAt,
+		RemoteLastEventID: in.RemoteLastEventId,
+		PendingCatchup:    in.PendingCatchup,
+	}
+}
+
+func peerStatusFromProto(in *pb.PeerStatus) PeerStatus {
+	if in == nil {
+		return PeerStatus{}
+	}
+
+	origins := make([]PeerOriginStatus, 0, len(in.Origins))
+	for _, origin := range in.Origins {
+		origins = append(origins, peerOriginStatusFromProto(origin))
+	}
+
+	return PeerStatus{
+		NodeID:                    in.NodeId,
+		ConfiguredURL:             in.ConfiguredUrl,
+		Connected:                 in.Connected,
+		SessionDirection:          in.SessionDirection,
+		Origins:                   origins,
+		PendingSnapshotPartitions: in.PendingSnapshotPartitions,
+		RemoteSnapshotVersion:     in.RemoteSnapshotVersion,
+		RemoteMessageWindowSize:   in.RemoteMessageWindowSize,
+		ClockOffsetMS:             in.ClockOffsetMs,
+		LastClockSync:             in.LastClockSync,
+		SnapshotDigestsSentTotal:  in.SnapshotDigestsSentTotal,
+		SnapshotDigestsRecvTotal:  in.SnapshotDigestsReceivedTotal,
+		SnapshotChunksSentTotal:   in.SnapshotChunksSentTotal,
+		SnapshotChunksRecvTotal:   in.SnapshotChunksReceivedTotal,
+		LastSnapshotDigestAt:      in.LastSnapshotDigestAt,
+		LastSnapshotChunkAt:       in.LastSnapshotChunkAt,
+	}
+}
+
+func messagesFromProto(items []*pb.Message) []Message {
+	out := make([]Message, 0, len(items))
+	for _, item := range items {
+		out = append(out, messageFromProto(item))
+	}
+	return out
+}
+
+func subscriptionsFromProto(items []*pb.Subscription) []Subscription {
+	out := make([]Subscription, 0, len(items))
+	for _, item := range items {
+		out = append(out, subscriptionFromProto(item))
+	}
+	return out
+}
+
+func eventsFromProto(items []*pb.Event) []Event {
+	out := make([]Event, 0, len(items))
+	for _, item := range items {
+		out = append(out, eventFromProto(item))
+	}
+	return out
+}
+
+func optionalStringField(value *string) *pb.StringField {
+	if value == nil {
+		return nil
+	}
+	return &pb.StringField{Value: *value}
+}
+
+func optionalBytesField(value *[]byte) *pb.BytesField {
+	if value == nil {
+		return nil
+	}
+	return &pb.BytesField{Value: append([]byte(nil), (*value)...)}
+}
