@@ -559,6 +559,51 @@ func (c *Client) ListEvents(ctx context.Context, after int64, limit int) ([]Even
 	return items, nil
 }
 
+func (c *Client) ListClusterNodes(ctx context.Context) ([]ClusterNode, error) {
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_ListClusterNodes{
+				ListClusterNodes: &pb.ListClusterNodesRequest{RequestId: requestID},
+			},
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	items, ok := res.value.([]ClusterNode)
+	if !ok {
+		return nil, &ProtocolError{Message: "missing items in list_cluster_nodes_response"}
+	}
+	return items, nil
+}
+
+func (c *Client) ListNodeLoggedInUsers(ctx context.Context, nodeID int64) ([]LoggedInUser, error) {
+	if nodeID == 0 {
+		return nil, fmt.Errorf("node_id is required")
+	}
+
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_ListNodeLoggedInUsers{
+				ListNodeLoggedInUsers: &pb.ListNodeLoggedInUsersRequest{
+					RequestId: requestID,
+					NodeId:    nodeID,
+				},
+			},
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	items, ok := res.value.([]LoggedInUser)
+	if !ok {
+		return nil, &ProtocolError{Message: "missing items in list_node_logged_in_users_response"}
+	}
+	return items, nil
+}
+
 func (c *Client) OperationsStatus(ctx context.Context) (OperationsStatus, error) {
 	var zero OperationsStatus
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
@@ -820,6 +865,10 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 		c.resolvePending(body.ListSubscriptionsResponse.RequestId, requestResult{value: subscriptionsFromProto(body.ListSubscriptionsResponse.Items)})
 	case *pb.ServerEnvelope_ListEventsResponse:
 		c.resolvePending(body.ListEventsResponse.RequestId, requestResult{value: eventsFromProto(body.ListEventsResponse.Items)})
+	case *pb.ServerEnvelope_ListClusterNodesResponse:
+		c.resolvePending(body.ListClusterNodesResponse.RequestId, requestResult{value: clusterNodesFromProto(body.ListClusterNodesResponse.Items)})
+	case *pb.ServerEnvelope_ListNodeLoggedInUsersResponse:
+		c.resolvePending(body.ListNodeLoggedInUsersResponse.RequestId, requestResult{value: loggedInUsersFromProto(body.ListNodeLoggedInUsersResponse.Items)})
 	case *pb.ServerEnvelope_OperationsStatusResponse:
 		c.resolvePending(body.OperationsStatusResponse.RequestId, requestResult{value: operationsStatusFromProto(body.OperationsStatusResponse.Status)})
 	case *pb.ServerEnvelope_MetricsResponse:

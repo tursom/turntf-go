@@ -23,7 +23,7 @@ go get github.com/tursom/turntf-go
 - `SendPacket`
 - `Ping`
 - HTTP 登录
-- WS 创建用户、订阅管理、查询消息、发消息、发瞬时包
+- WS 创建用户、订阅管理、查询消息、集群查询、发消息、发瞬时包
 
 ## 包内容
 
@@ -115,7 +115,6 @@ func main() {
 
 	_, err = client.SendMessage(ctx, turntf.SendMessageInput{
 		Target: turntf.UserRef{NodeID: 4096, UserID: 1025},
-		Sender: "mobile",
 		Body:   []byte("hello"),
 	})
 	if err != nil {
@@ -249,6 +248,8 @@ if err := client.Connect(ctx); err != nil { ... }
 user, err := client.CreateUser(ctx, token, turntf.CreateUserRequest{...})
 err = client.CreateSubscription(ctx, token, userRef, channelRef)
 messages, err := client.ListMessages(ctx, token, target, 20)
+nodes, err := client.ListClusterNodes(ctx)
+users, err := client.ListNodeLoggedInUsers(ctx, 4096)
 message, err := client.PostMessage(ctx, token, target, payload)
 err = client.PostPacket(ctx, token, target.NodeID, target, payload, turntf.DeliveryModeRouteRetry)
 ```
@@ -264,7 +265,6 @@ httpClient := client.HTTP()
 ```go
 msg, err := client.SendMessage(ctx, turntf.SendMessageInput{
 	Target: turntf.UserRef{NodeID: 4096, UserID: 1025},
-	Sender: "orders",
 	Body:   []byte{0xff, 0x00},
 })
 ```
@@ -276,7 +276,6 @@ msg, err := client.SendMessage(ctx, turntf.SendMessageInput{
 ```go
 accepted, err := client.SendPacket(ctx, turntf.SendPacketInput{
 	Target:       turntf.UserRef{NodeID: 8192, UserID: 1025},
-	Sender:       "relay",
 	Body:         []byte{0xff, 0x00},
 	DeliveryMode: turntf.DeliveryModeRouteRetry,
 })
@@ -361,6 +360,13 @@ err := httpClient.PostPacket(
 )
 ```
 
+### 集群查询
+
+```go
+nodes, err := httpClient.ListClusterNodes(ctx, token)
+users, err := httpClient.ListNodeLoggedInUsers(ctx, token, 4096)
+```
+
 HTTP `body` 在 SDK 外部统一使用 `[]byte`，SDK 内部会自动做 JSON base64 编解码。
 
 ## 错误处理
@@ -406,4 +412,6 @@ go test ./...
 - `SendMessage` / `Ping` 请求匹配
 - `unauthorized` 停止自动重连
 - 断线后使用 `seen_messages` 重连
+- WS 集群节点与节点在线用户查询
+- HTTP 集群节点与节点在线用户查询
 - HTTP base64 编解码与 Bearer token 注入

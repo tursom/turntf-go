@@ -89,6 +89,18 @@ type Event struct {
 	EventJSON       []byte `json:"event_json,omitempty"`
 }
 
+type ClusterNode struct {
+	NodeID        int64  `json:"node_id"`
+	IsLocal       bool   `json:"is_local"`
+	ConfiguredURL string `json:"configured_url,omitempty"`
+}
+
+type LoggedInUser struct {
+	NodeID   int64  `json:"node_id"`
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username"`
+}
+
 type MessageTrimStatus struct {
 	TrimmedTotal  int64  `json:"trimmed_total"`
 	LastTrimmedAt string `json:"last_trimmed_at,omitempty"`
@@ -342,6 +354,28 @@ func eventFromProto(in *pb.Event) Event {
 	}
 }
 
+func clusterNodeFromProto(in *pb.ClusterNode) ClusterNode {
+	if in == nil {
+		return ClusterNode{}
+	}
+	return ClusterNode{
+		NodeID:        in.NodeId,
+		IsLocal:       in.IsLocal,
+		ConfiguredURL: in.ConfiguredUrl,
+	}
+}
+
+func loggedInUserFromProto(in *pb.LoggedInUser) LoggedInUser {
+	if in == nil {
+		return LoggedInUser{}
+	}
+	return LoggedInUser{
+		NodeID:   in.NodeId,
+		UserID:   in.UserId,
+		Username: in.Username,
+	}
+}
+
 func operationsStatusFromProto(in *pb.OperationsStatus) OperationsStatus {
 	if in == nil {
 		return OperationsStatus{}
@@ -449,6 +483,22 @@ func eventsFromProto(items []*pb.Event) []Event {
 	out := make([]Event, 0, len(items))
 	for _, item := range items {
 		out = append(out, eventFromProto(item))
+	}
+	return out
+}
+
+func clusterNodesFromProto(items []*pb.ClusterNode) []ClusterNode {
+	out := make([]ClusterNode, 0, len(items))
+	for _, item := range items {
+		out = append(out, clusterNodeFromProto(item))
+	}
+	return out
+}
+
+func loggedInUsersFromProto(items []*pb.LoggedInUser) []LoggedInUser {
+	out := make([]LoggedInUser, 0, len(items))
+	for _, item := range items {
+		out = append(out, loggedInUserFromProto(item))
 	}
 	return out
 }

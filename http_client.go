@@ -154,6 +154,23 @@ func (c *HTTPClient) PostPacket(ctx context.Context, token string, targetNodeID 
 	}, http.StatusAccepted, nil)
 }
 
+func (c *HTTPClient) ListClusterNodes(ctx context.Context, token string) ([]ClusterNode, error) {
+	var nodes []ClusterNode
+	err := c.doJSON(ctx, http.MethodGet, "/cluster/nodes", token, nil, http.StatusOK, &nodes)
+	return nodes, err
+}
+
+func (c *HTTPClient) ListNodeLoggedInUsers(ctx context.Context, token string, nodeID int64) ([]LoggedInUser, error) {
+	if nodeID == 0 {
+		return nil, fmt.Errorf("node_id is required")
+	}
+
+	var users []LoggedInUser
+	path := fmt.Sprintf("/cluster/nodes/%d/logged-in-users", nodeID)
+	err := c.doJSON(ctx, http.MethodGet, path, token, nil, http.StatusOK, &users)
+	return users, err
+}
+
 func (c *HTTPClient) doJSON(ctx context.Context, method, path, token string, reqBody any, wantStatus int, out any) error {
 	fullURL := strings.TrimRight(c.BaseURL, "/") + path
 	var body io.Reader

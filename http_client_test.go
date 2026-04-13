@@ -89,6 +89,39 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusAccepted)
 	})
+	mux.HandleFunc("/cluster/nodes", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method for cluster nodes: %s", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		json.NewEncoder(w).Encode([]ClusterNode{
+			{NodeID: 4096, IsLocal: true},
+			{NodeID: 8192, IsLocal: false, ConfiguredURL: "ws://127.0.0.1:9081/internal/cluster/ws"},
+		})
+	})
+	mux.HandleFunc("/cluster/nodes/4096/logged-in-users", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method for logged-in users: %s", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		json.NewEncoder(w).Encode([]LoggedInUser{
+			{NodeID: 4096, UserID: 1025, Username: "alice"},
+			{NodeID: 4096, UserID: 1026, Username: "bob"},
+		})
+	})
+	mux.HandleFunc("/cluster/nodes/8192/logged-in-users", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method for empty logged-in users: %s", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		json.NewEncoder(w).Encode([]LoggedInUser{})
+	})
 
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -138,6 +171,37 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 
 	if err := client.PostPacket(ctx, token, 8192, UserRef{NodeID: 8192, UserID: 1025}, []byte{0xff, 0x00}, DeliveryModeRouteRetry); err != nil {
 		t.Fatalf("PostPacket: %v", err)
+	}
+
+	nodes, err := client.ListClusterNodes(ctx, token)
+	if err != nil {
+		t.Fatalf("ListClusterNodes: %v", err)
+	}
+	if len(nodes) != 2 || !nodes[0].IsLocal || nodes[1].ConfiguredURL == "" {
+		t.Fatalf("unexpected cluster nodes: %+v", nodes)
+	}
+
+	users, err := client.ListNodeLoggedInUsers(ctx, token, 4096)
+	if err != nil {
+		t.Fatalf("ListNodeLoggedInUsers: %v", err)
+	}
+	if len(users) != 2 || users[0].Username != "alice" || users[1].UserID != 1026 {
+		t.Fatalf("unexpected logged-in users: %+v", users)
+	}
+
+	emptyUsers, err := client.ListNodeLoggedInUsers(ctx, token, 8192)
+	if err != nil {
+		t.Fatalf("ListNodeLoggedInUsers empty: %v", err)
+	}
+	if len(emptyUsers) != 0 {
+		t.Fatalf("expected empty logged-in users, got %+v", emptyUsers)
+	}
+}
+
+func TestHTTPClientListNodeLoggedInUsersRequiresNodeID(t *testing.T) {
+	client := NewHTTPClient("http://127.0.0.1:8080")
+	if _, err := client.ListNodeLoggedInUsers(context.Background(), "token", 0); err == nil {
+		t.Fatal("expected validation error for empty node_id")
 	}
 }
 

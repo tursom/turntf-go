@@ -273,6 +273,133 @@ func TestClientUnauthorizedStopsReconnect(t *testing.T) {
 	_ = client.Close()
 }
 
+func TestClientListClusterQueries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		login := mustReadClientEnvelope(t, conn)
+		if got := login.GetLogin().GetUser(); got == nil || got.NodeId != 4096 || got.UserId != 1025 {
+			t.Fatalf("unexpected login user: %+v", got)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
+					ProtocolVersion: "client-v1alpha1",
+				},
+			},
+		})
+
+		nodesReq := mustReadClientEnvelope(t, conn)
+		if nodesReq.GetListClusterNodes().GetRequestId() == 0 {
+			t.Fatal("expected request_id for list_cluster_nodes")
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_ListClusterNodesResponse{
+				ListClusterNodesResponse: &pb.ListClusterNodesResponse{
+					RequestId: nodesReq.GetListClusterNodes().GetRequestId(),
+					Items: []*pb.ClusterNode{
+						{NodeId: 4096, IsLocal: true},
+						{NodeId: 8192, IsLocal: false, ConfiguredUrl: "ws://127.0.0.1:9081/internal/cluster/ws"},
+					},
+					Count: 2,
+				},
+			},
+		})
+
+		usersReq := mustReadClientEnvelope(t, conn)
+		if usersReq.GetListNodeLoggedInUsers().GetNodeId() != 4096 {
+			t.Fatalf("unexpected node_id: %d", usersReq.GetListNodeLoggedInUsers().GetNodeId())
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_ListNodeLoggedInUsersResponse{
+				ListNodeLoggedInUsersResponse: &pb.ListNodeLoggedInUsersResponse{
+					RequestId:    usersReq.GetListNodeLoggedInUsers().GetRequestId(),
+					TargetNodeId: 4096,
+					Items: []*pb.LoggedInUser{
+						{NodeId: 4096, UserId: 1025, Username: "alice"},
+						{NodeId: 4096, UserId: 1026, Username: "bob"},
+					},
+					Count: 2,
+				},
+			},
+		})
+
+		emptyReq := mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_ListClusterNodesResponse{
+				ListClusterNodesResponse: &pb.ListClusterNodesResponse{
+					RequestId: emptyReq.GetListClusterNodes().GetRequestId(),
+					Items:     []*pb.ClusterNode{},
+					Count:     0,
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:        server.URL,
+		Credentials:    Credentials{NodeID: 4096, UserID: 1025, Password: "alice-password"},
+		RequestTimeout: 2 * time.Second,
+		PingInterval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	nodes, err := client.ListClusterNodes(ctx)
+	if err != nil {
+		t.Fatalf("ListClusterNodes: %v", err)
+	}
+	if len(nodes) != 2 || !nodes[0].IsLocal || nodes[1].ConfiguredURL == "" {
+		t.Fatalf("unexpected cluster nodes: %+v", nodes)
+	}
+
+	users, err := client.ListNodeLoggedInUsers(ctx, 4096)
+	if err != nil {
+		t.Fatalf("ListNodeLoggedInUsers: %v", err)
+	}
+	if len(users) != 2 || users[0].Username != "alice" || users[1].UserID != 1026 {
+		t.Fatalf("unexpected logged-in users: %+v", users)
+	}
+
+	emptyNodes, err := client.ListClusterNodes(ctx)
+	if err != nil {
+		t.Fatalf("ListClusterNodes empty: %v", err)
+	}
+	if len(emptyNodes) != 0 {
+		t.Fatalf("expected empty cluster nodes, got %+v", emptyNodes)
+	}
+}
+
+func TestClientListNodeLoggedInUsersRequiresNodeID(t *testing.T) {
+	client, err := NewClient(Config{
+		BaseURL:      "http://127.0.0.1:8080",
+		Credentials:  Credentials{NodeID: 4096, UserID: 1025, Password: "alice-password"},
+		PingInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	if _, err := client.ListNodeLoggedInUsers(context.Background(), 0); err == nil {
+		t.Fatal("expected validation error for empty node_id")
+	}
+}
+
 func TestClientReconnectUsesSeenMessages(t *testing.T) {
 	store := &recordingStore{}
 	var attempts atomic.Int32
