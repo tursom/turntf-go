@@ -1,5 +1,7 @@
 # AGENTS
 
+DEMO 用来测试 ws 接口，不允许调用 htto 接口
+
 ## Proto
 
 - 定义文件：`proto/client.proto`

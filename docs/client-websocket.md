@@ -65,7 +65,7 @@ ServerEnvelope {
 - `seq`：该生产节点为目标用户生成的消息序号。
 - 客户端收到并持久化消息后，应保存 `(node_id, seq)`。
 - 客户端重连登录时，把已持久化的游标放入 `LoginRequest.seen_messages`，服务端会跳过这些消息。
-- 服务端推送的 `Message` 仍包含 `user_node_id` 和 `user_id`，用于说明该消息归属的目标用户、channel 或 broadcast 地址。
+- 服务端推送的 `Message` 通过 `recipient: UserRef` 标识该消息归属的目标用户、channel 或 broadcast 地址。
 
 注意：当前服务端只在连接内存中使用 `AckMessage` 更新去重集合，不会把客户端 ack 状态写入数据库。可靠重连依赖客户端在下次 `LoginRequest.seen_messages` 中上报已持久化游标。
 
@@ -79,11 +79,10 @@ ServerEnvelope {
 ServerEnvelope {
   message_pushed: MessagePushed {
     message: {
-      user_node_id: 4096
-      user_id: 1025
+      recipient: { node_id: 4096, user_id: 1025 }
       node_id: 4096
       seq: 3
-      sender: "orders"
+      sender: { node_id: 4096, user_id: 1 }
       body: "\xff\x00payload"
       created_at_hlc: "..."
     }
@@ -101,7 +100,7 @@ ServerEnvelope {
       source_node_id: 4096
       target_node_id: 8192
       recipient: { node_id: 8192, user_id: 1025 }
-      sender: "relay"
+      sender: { node_id: 4096, user_id: 1 }
       body: "\xff\x00payload"
       delivery_mode: CLIENT_DELIVERY_MODE_BEST_EFFORT
     }
@@ -143,7 +142,6 @@ ClientEnvelope {
   send_message: SendMessageRequest {
     request_id: 42
     target: { node_id: 4096, user_id: 1025 }
-    sender: "orders"
     body: "\xff\x00payload"
   }
 }
@@ -156,7 +154,6 @@ ClientEnvelope {
   send_message: SendMessageRequest {
     request_id: 43
     target: { node_id: 8192, user_id: 1025 }
-    sender: "relay"
     body: "\xff\x00payload"
     delivery_kind: CLIENT_DELIVERY_KIND_TRANSIENT
     delivery_mode: CLIENT_DELIVERY_MODE_ROUTE_RETRY
@@ -168,7 +165,7 @@ ClientEnvelope {
 
 - `request_id`：客户端生成的请求 ID，服务端在响应或错误中原样返回。
 - `target`：消息目标用户、channel 或 broadcast 地址。
-- `sender`：发送方或来源标签，不能为空。
+- `sender`：不再由客户端传入，服务端会根据已认证连接生成 `UserRef { node_id, user_id }`。
 - `body`：原始字节数组，不能为空；不要求 UTF-8。
 - `delivery_kind`：可选 `CLIENT_DELIVERY_KIND_PERSISTENT` 或 `CLIENT_DELIVERY_KIND_TRANSIENT`，默认是持久化消息。
 - `delivery_mode`：仅在 `delivery_kind = CLIENT_DELIVERY_KIND_TRANSIENT` 时生效；可选 `CLIENT_DELIVERY_MODE_BEST_EFFORT` 或 `CLIENT_DELIVERY_MODE_ROUTE_RETRY`。
@@ -187,11 +184,10 @@ ServerEnvelope {
   send_message_response: SendMessageResponse {
     request_id: 42
     message: {
-      user_node_id: 4096
-      user_id: 1025
+      recipient: { node_id: 4096, user_id: 1025 }
       node_id: 4096
       seq: 4
-      sender: "orders"
+      sender: { node_id: 4096, user_id: 1 }
       body: "\xff\x00payload"
       created_at_hlc: "..."
     }
@@ -275,10 +271,8 @@ ServerEnvelope {
     request_id: 1002
     items: [
       {
-        subscriber_node_id: 4096
-        subscriber_user_id: 1025
-        channel_node_id: 4096
-        channel_user_id: 1026
+        subscriber: { node_id: 4096, user_id: 1025 }
+        channel: { node_id: 4096, user_id: 1026 }
         subscribed_at: "..."
       }
     ]

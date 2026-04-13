@@ -13,12 +13,6 @@
 go get github.com/tursom/turntf-go
 ```
 
-如果你想要一个可直接运行的测试 / demo 客户端，也可以直接构建仓库里的 CLI：
-
-```bash
-go build ./cmd/turntf-client
-```
-
 ## 功能
 
 - WebSocket 首帧登录
@@ -30,61 +24,6 @@ go build ./cmd/turntf-client
 - `Ping`
 - HTTP 登录
 - WS 创建用户、订阅管理、查询消息、发消息、发瞬时包
-
-## CLI Demo Client
-
-仓库内置了一个 `turntf-client` 可执行程序，适合做联调测试、脚本化调用和现场 demo。
-
-它支持：
-
-- `listen`：登录 WS 并持续打印 `login` / `message` / `packet` / `disconnect` 事件
-- `send-message` / `send-packet`：发送持久化消息或瞬时包
-- `login`：管理员 HTTP 登录并输出 token
-- `create-user` / `create-channel` / `subscribe`：管理员 HTTP 管理命令
-- `get-user` / `update-user` / `delete-user` / `list-messages` / `list-subscriptions`
-- `list-events` / `ops-status` / `metrics`
-- `demo`：自动创建 demo 用户，发一条消息后保持监听
-
-常用环境变量：
-
-```bash
-export TURNTF_BASE_URL=http://127.0.0.1:8080
-export TURNTF_NODE_ID=4096
-export TURNTF_USER_ID=1025
-export TURNTF_PASSWORD=alice-password
-export TURNTF_ADMIN_NODE_ID=4096
-export TURNTF_ADMIN_USER_ID=1
-export TURNTF_ADMIN_PASSWORD=root
-```
-
-最短示例：
-
-```bash
-go run ./cmd/turntf-client --base-url http://127.0.0.1:8080 \
-  --node-id 4096 --user-id 1025 --password alice-password \
-  listen
-
-go run ./cmd/turntf-client --base-url http://127.0.0.1:8080 \
-  --node-id 4096 --user-id 1 --password root \
-  send-message --target-node-id 4096 --target-user-id 1025 \
-  --sender ops --body 'hello'
-
-go run ./cmd/turntf-client --base-url http://127.0.0.1:8080 \
-  --admin-node-id 4096 --admin-user-id 1 --admin-password root \
-  login
-
-go run ./cmd/turntf-client --base-url http://127.0.0.1:8080 \
-  --admin-node-id 4096 --admin-user-id 1 --admin-password root \
-  demo
-```
-
-推荐演示顺序：
-
-1. 一个终端运行 `listen`，持续观察登录和收消息事件。
-2. 另一个终端运行 `send-message` 或 `send-packet`。
-3. 如果想展示完整流程，直接运行 `demo`，它会创建 demo 用户并发出一条消息。
-
-`--json` 可切换成结构化输出；消息体支持 `--body`、`--body-hex` 或 `--body-file`。
 
 ## 包内容
 
@@ -119,11 +58,11 @@ func (handler) OnLogin(_ context.Context, info turntf.LoginInfo) {
 }
 
 func (handler) OnMessage(_ context.Context, msg turntf.Message) {
-	log.Printf("message: seq=%d sender=%s body=%x", msg.Seq, msg.Sender, msg.Body)
+	log.Printf("message: recipient=%d:%d seq=%d sender=%d:%d body=%x", msg.Recipient.NodeID, msg.Recipient.UserID, msg.Seq, msg.Sender.NodeID, msg.Sender.UserID, msg.Body)
 }
 
 func (handler) OnPacket(_ context.Context, packet turntf.Packet) {
-	log.Printf("packet: id=%d sender=%s", packet.PacketID, packet.Sender)
+	log.Printf("packet: id=%d recipient=%d:%d sender=%d:%d", packet.PacketID, packet.Recipient.NodeID, packet.Recipient.UserID, packet.Sender.NodeID, packet.Sender.UserID)
 }
 
 func (handler) OnError(_ context.Context, err error) {
@@ -310,8 +249,8 @@ if err := client.Connect(ctx); err != nil { ... }
 user, err := client.CreateUser(ctx, token, turntf.CreateUserRequest{...})
 err = client.CreateSubscription(ctx, token, userRef, channelRef)
 messages, err := client.ListMessages(ctx, token, target, 20)
-message, err := client.PostMessage(ctx, token, target, "ops", payload)
-err = client.PostPacket(ctx, token, target.NodeID, target, "relay", payload, turntf.DeliveryModeRouteRetry)
+message, err := client.PostMessage(ctx, token, target, payload)
+err = client.PostPacket(ctx, token, target.NodeID, target, payload, turntf.DeliveryModeRouteRetry)
 ```
 
 如果你想拿到底层 HTTP 客户端本身，也可以：
@@ -405,7 +344,6 @@ message, err := httpClient.PostMessage(
 	ctx,
 	token,
 	turntf.UserRef{NodeID: 4096, UserID: 1025},
-	"ops",
 	[]byte{0xff, 0x00},
 )
 ```
@@ -418,7 +356,6 @@ err := httpClient.PostPacket(
 	token,
 	8192,
 	turntf.UserRef{NodeID: 8192, UserID: 1025},
-	"relay",
 	[]byte{0xff, 0x00},
 	turntf.DeliveryModeRouteRetry,
 )

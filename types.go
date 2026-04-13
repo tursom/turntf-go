@@ -43,13 +43,12 @@ const (
 )
 
 type Message struct {
-	UserNodeID   int64  `json:"user_node_id"`
-	UserID       int64  `json:"user_id"`
-	NodeID       int64  `json:"node_id"`
-	Seq          int64  `json:"seq"`
-	Sender       string `json:"sender"`
-	Body         []byte `json:"body"`
-	CreatedAtHLC string `json:"created_at_hlc"`
+	Recipient    UserRef `json:"recipient"`
+	NodeID       int64   `json:"node_id"`
+	Seq          int64   `json:"seq"`
+	Sender       UserRef `json:"sender"`
+	Body         []byte  `json:"body"`
+	CreatedAtHLC string  `json:"created_at_hlc"`
 }
 
 type Packet struct {
@@ -57,7 +56,7 @@ type Packet struct {
 	SourceNodeID int64        `json:"source_node_id"`
 	TargetNodeID int64        `json:"target_node_id"`
 	Recipient    UserRef      `json:"recipient"`
-	Sender       string       `json:"sender"`
+	Sender       UserRef      `json:"sender"`
 	Body         []byte       `json:"body"`
 	DeliveryMode DeliveryMode `json:"delivery_mode"`
 }
@@ -71,13 +70,11 @@ type RelayAccepted struct {
 }
 
 type Subscription struct {
-	SubscriberNodeID int64  `json:"subscriber_node_id"`
-	SubscriberUserID int64  `json:"subscriber_user_id"`
-	ChannelNodeID    int64  `json:"channel_node_id"`
-	ChannelUserID    int64  `json:"channel_user_id"`
-	SubscribedAt     string `json:"subscribed_at,omitempty"`
-	DeletedAt        string `json:"deleted_at,omitempty"`
-	OriginNodeID     int64  `json:"origin_node_id"`
+	Subscriber   UserRef `json:"subscriber"`
+	Channel      UserRef `json:"channel"`
+	SubscribedAt string  `json:"subscribed_at,omitempty"`
+	DeletedAt    string  `json:"deleted_at,omitempty"`
+	OriginNodeID int64   `json:"origin_node_id"`
 }
 
 type Event struct {
@@ -143,9 +140,8 @@ type OperationsStatus struct {
 }
 
 type DeleteUserResult struct {
-	Status string `json:"status"`
-	NodeID int64  `json:"node_id"`
-	UserID int64  `json:"user_id"`
+	Status string  `json:"status"`
+	User   UserRef `json:"user"`
 }
 
 type LoginInfo struct {
@@ -155,13 +151,11 @@ type LoginInfo struct {
 
 type SendMessageInput struct {
 	Target UserRef
-	Sender string
 	Body   []byte
 }
 
 type SendPacketInput struct {
 	Target       UserRef
-	Sender       string
 	Body         []byte
 	DeliveryMode DeliveryMode
 }
@@ -281,11 +275,10 @@ func messageFromProto(in *pb.Message) Message {
 		return Message{}
 	}
 	return Message{
-		UserNodeID:   in.UserNodeId,
-		UserID:       in.UserId,
+		Recipient:    userRefFromProto(in.Recipient),
 		NodeID:       in.NodeId,
 		Seq:          in.Seq,
-		Sender:       in.Sender,
+		Sender:       userRefFromProto(in.Sender),
 		Body:         append([]byte(nil), in.Body...),
 		CreatedAtHLC: in.CreatedAtHlc,
 	}
@@ -300,7 +293,7 @@ func packetFromProto(in *pb.Packet) Packet {
 		SourceNodeID: in.SourceNodeId,
 		TargetNodeID: in.TargetNodeId,
 		Recipient:    userRefFromProto(in.Recipient),
-		Sender:       in.Sender,
+		Sender:       userRefFromProto(in.Sender),
 		Body:         append([]byte(nil), in.Body...),
 		DeliveryMode: deliveryModeFromProto(in.DeliveryMode),
 	}
@@ -324,13 +317,11 @@ func subscriptionFromProto(in *pb.Subscription) Subscription {
 		return Subscription{}
 	}
 	return Subscription{
-		SubscriberNodeID: in.SubscriberNodeId,
-		SubscriberUserID: in.SubscriberUserId,
-		ChannelNodeID:    in.ChannelNodeId,
-		ChannelUserID:    in.ChannelUserId,
-		SubscribedAt:     in.SubscribedAt,
-		DeletedAt:        in.DeletedAt,
-		OriginNodeID:     in.OriginNodeId,
+		Subscriber:   userRefFromProto(in.Subscriber),
+		Channel:      userRefFromProto(in.Channel),
+		SubscribedAt: in.SubscribedAt,
+		DeletedAt:    in.DeletedAt,
+		OriginNodeID: in.OriginNodeId,
 	}
 }
 

@@ -96,6 +96,9 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 		defer conn.Close(websocket.StatusNormalClosure, "done")
 
 		login := mustReadClientEnvelope(t, conn)
+		if got := login.GetLogin().GetUser(); got == nil || got.NodeId != 4096 || got.UserId != 1025 {
+			t.Fatalf("unexpected login user: %+v", got)
+		}
 		firstSeen = append([]*pb.MessageCursor(nil), login.GetLogin().SeenMessages...)
 
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
@@ -116,11 +119,10 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 			Body: &pb.ServerEnvelope_MessagePushed{
 				MessagePushed: &pb.MessagePushed{
 					Message: &pb.Message{
-						UserNodeId:   4096,
-						UserId:       1025,
+						Recipient:    &pb.UserRef{NodeId: 4096, UserId: 1025},
 						NodeId:       4096,
 						Seq:          7,
-						Sender:       "orders",
+						Sender:       &pb.UserRef{NodeId: 4096, UserId: 1},
 						Body:         []byte{0xff, 0x00},
 						CreatedAtHlc: "hlc1",
 					},
@@ -141,11 +143,10 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 					RequestId: sendReq.GetSendMessage().RequestId,
 					Body: &pb.SendMessageResponse_Message{
 						Message: &pb.Message{
-							UserNodeId:   4096,
-							UserId:       1025,
+							Recipient:    &pb.UserRef{NodeId: 4096, UserId: 1025},
 							NodeId:       4096,
 							Seq:          8,
-							Sender:       sendReq.GetSendMessage().Sender,
+							Sender:       &pb.UserRef{NodeId: 4096, UserId: 1025},
 							Body:         sendReq.GetSendMessage().Body,
 							CreatedAtHlc: "hlc2",
 						},
@@ -192,7 +193,6 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 
 	msg, err := client.SendMessage(ctx, SendMessageInput{
 		Target: UserRef{NodeID: 4096, UserID: 1025},
-		Sender: "mobile",
 		Body:   []byte("payload"),
 	})
 	if err != nil {
@@ -200,6 +200,12 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 	}
 	if msg.Seq != 8 {
 		t.Fatalf("unexpected message seq: %d", msg.Seq)
+	}
+	if msg.Recipient != (UserRef{NodeID: 4096, UserID: 1025}) {
+		t.Fatalf("unexpected message recipient: %+v", msg.Recipient)
+	}
+	if msg.Sender != (UserRef{NodeID: 4096, UserID: 1025}) {
+		t.Fatalf("unexpected message sender: %+v", msg.Sender)
 	}
 	if err := client.Ping(ctx); err != nil {
 		t.Fatalf("Ping: %v", err)
@@ -297,11 +303,10 @@ func TestClientReconnectUsesSeenMessages(t *testing.T) {
 				Body: &pb.ServerEnvelope_MessagePushed{
 					MessagePushed: &pb.MessagePushed{
 						Message: &pb.Message{
-							UserNodeId:   4096,
-							UserId:       1025,
+							Recipient:    &pb.UserRef{NodeId: 4096, UserId: 1025},
 							NodeId:       4096,
 							Seq:          11,
-							Sender:       "orders",
+							Sender:       &pb.UserRef{NodeId: 4096, UserId: 1},
 							Body:         []byte("hello"),
 							CreatedAtHlc: "hlc1",
 						},

@@ -37,7 +37,6 @@ type httpSubscriptionRequest struct {
 }
 
 type httpMessageRequest struct {
-	Sender       string   `json:"sender"`
 	Body         []byte   `json:"body"`
 	RelayTarget  *UserRef `json:"relay_target,omitempty"`
 	DeliveryMode string   `json:"delivery_mode,omitempty"`
@@ -118,34 +117,27 @@ func (c *HTTPClient) ListMessages(ctx context.Context, token string, target User
 	return messages, err
 }
 
-func (c *HTTPClient) PostMessage(ctx context.Context, token string, target UserRef, sender string, body []byte) (Message, error) {
+func (c *HTTPClient) PostMessage(ctx context.Context, token string, target UserRef, body []byte) (Message, error) {
 	var message Message
 	if err := target.validate(); err != nil {
 		return message, fmt.Errorf("invalid target: %w", err)
-	}
-	if sender == "" {
-		return message, fmt.Errorf("sender is required")
 	}
 	if len(body) == 0 {
 		return message, fmt.Errorf("body is required")
 	}
 	path := fmt.Sprintf("/nodes/%d/users/%d/messages", target.NodeID, target.UserID)
 	err := c.doJSON(ctx, http.MethodPost, path, token, httpMessageRequest{
-		Sender: sender,
-		Body:   body,
+		Body: body,
 	}, http.StatusOK, &message)
 	return message, err
 }
 
-func (c *HTTPClient) PostPacket(ctx context.Context, token string, targetNodeID int64, relayTarget UserRef, sender string, body []byte, mode DeliveryMode) error {
+func (c *HTTPClient) PostPacket(ctx context.Context, token string, targetNodeID int64, relayTarget UserRef, body []byte, mode DeliveryMode) error {
 	if targetNodeID == 0 {
 		return fmt.Errorf("target node_id is required")
 	}
 	if err := relayTarget.validate(); err != nil {
 		return fmt.Errorf("invalid relay_target: %w", err)
-	}
-	if sender == "" {
-		return fmt.Errorf("sender is required")
 	}
 	if len(body) == 0 {
 		return fmt.Errorf("body is required")
@@ -156,7 +148,6 @@ func (c *HTTPClient) PostPacket(ctx context.Context, token string, targetNodeID 
 
 	path := fmt.Sprintf("/nodes/%d/users/3/messages", targetNodeID)
 	return c.doJSON(ctx, http.MethodPost, path, token, httpMessageRequest{
-		Sender:       sender,
 		Body:         body,
 		RelayTarget:  &relayTarget,
 		DeliveryMode: string(mode),

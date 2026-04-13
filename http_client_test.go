@@ -52,11 +52,10 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 				t.Fatalf("unexpected limit: %q", got)
 			}
 			json.NewEncoder(w).Encode([]Message{{
-				UserNodeID:   4096,
-				UserID:       1025,
+				Recipient:    UserRef{NodeID: 4096, UserID: 1025},
 				NodeID:       4096,
 				Seq:          3,
-				Sender:       "ops",
+				Sender:       UserRef{NodeID: 4096, UserID: 1},
 				Body:         []byte{0xff, 0x00},
 				CreatedAtHLC: "hlc1",
 			}})
@@ -69,11 +68,10 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 				t.Fatalf("body was not base64 encoded: %#v", raw["body"])
 			}
 			json.NewEncoder(w).Encode(Message{
-				UserNodeID:   4096,
-				UserID:       1025,
+				Recipient:    UserRef{NodeID: 4096, UserID: 1025},
 				NodeID:       4096,
 				Seq:          4,
-				Sender:       "ops",
+				Sender:       UserRef{NodeID: 4096, UserID: 1},
 				Body:         []byte{0xff, 0x00},
 				CreatedAtHLC: "hlc2",
 			})
@@ -130,7 +128,7 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		t.Fatalf("unexpected messages: %+v", messages)
 	}
 
-	message, err := client.PostMessage(ctx, token, UserRef{NodeID: 4096, UserID: 1025}, "ops", []byte{0xff, 0x00})
+	message, err := client.PostMessage(ctx, token, UserRef{NodeID: 4096, UserID: 1025}, []byte{0xff, 0x00})
 	if err != nil {
 		t.Fatalf("PostMessage: %v", err)
 	}
@@ -138,7 +136,7 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		t.Fatalf("unexpected post message response: %+v", message)
 	}
 
-	if err := client.PostPacket(ctx, token, 8192, UserRef{NodeID: 8192, UserID: 1025}, "relay", []byte{0xff, 0x00}, DeliveryModeRouteRetry); err != nil {
+	if err := client.PostPacket(ctx, token, 8192, UserRef{NodeID: 8192, UserID: 1025}, []byte{0xff, 0x00}, DeliveryModeRouteRetry); err != nil {
 		t.Fatalf("PostPacket: %v", err)
 	}
 }
@@ -156,7 +154,7 @@ func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 		defer conn.Close(websocket.StatusNormalClosure, "done")
 
 		login := mustReadClientEnvelope(t, conn)
-		if login.GetLogin().UserId != 1025 {
+		if login.GetLogin().GetUser().GetUserId() != 1025 {
 			t.Fatalf("unexpected login user: %+v", login.GetLogin())
 		}
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{

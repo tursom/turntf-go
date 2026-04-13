@@ -190,23 +190,21 @@ func (c *Client) ListMessages(ctx context.Context, token string, target UserRef,
 	return c.WSListMessages(ctx, target, limit)
 }
 
-func (c *Client) PostMessage(ctx context.Context, token string, target UserRef, sender string, body []byte) (Message, error) {
+func (c *Client) PostMessage(ctx context.Context, token string, target UserRef, body []byte) (Message, error) {
 	_ = token
 	return c.SendMessage(ctx, SendMessageInput{
 		Target: target,
-		Sender: sender,
 		Body:   body,
 	})
 }
 
-func (c *Client) PostPacket(ctx context.Context, token string, targetNodeID int64, relayTarget UserRef, sender string, body []byte, mode DeliveryMode) error {
+func (c *Client) PostPacket(ctx context.Context, token string, targetNodeID int64, relayTarget UserRef, body []byte, mode DeliveryMode) error {
 	_ = token
 	if targetNodeID != 0 && targetNodeID != relayTarget.NodeID {
 		return fmt.Errorf("target node ID %d does not match target user node_id %d", targetNodeID, relayTarget.NodeID)
 	}
 	_, err := c.SendPacket(ctx, SendPacketInput{
 		Target:       relayTarget,
-		Sender:       sender,
 		Body:         body,
 		DeliveryMode: mode,
 	})
@@ -271,9 +269,6 @@ func (c *Client) SendMessage(ctx context.Context, input SendMessageInput) (Messa
 	if err := input.Target.validate(); err != nil {
 		return zero, fmt.Errorf("invalid target: %w", err)
 	}
-	if input.Sender == "" {
-		return zero, fmt.Errorf("sender is required")
-	}
 	if len(input.Body) == 0 {
 		return zero, fmt.Errorf("body is required")
 	}
@@ -284,7 +279,6 @@ func (c *Client) SendMessage(ctx context.Context, input SendMessageInput) (Messa
 				SendMessage: &pb.SendMessageRequest{
 					RequestId: requestID,
 					Target:    userRefToProto(input.Target),
-					Sender:    input.Sender,
 					Body:      append([]byte(nil), input.Body...),
 				},
 			},
@@ -308,9 +302,6 @@ func (c *Client) SendPacket(ctx context.Context, input SendPacketInput) (RelayAc
 	if err := input.Target.validate(); err != nil {
 		return zero, fmt.Errorf("invalid target: %w", err)
 	}
-	if input.Sender == "" {
-		return zero, fmt.Errorf("sender is required")
-	}
 	if len(input.Body) == 0 {
 		return zero, fmt.Errorf("body is required")
 	}
@@ -324,7 +315,6 @@ func (c *Client) SendPacket(ctx context.Context, input SendPacketInput) (RelayAc
 				SendMessage: &pb.SendMessageRequest{
 					RequestId:    requestID,
 					Target:       userRefToProto(input.Target),
-					Sender:       input.Sender,
 					Body:         append([]byte(nil), input.Body...),
 					DeliveryKind: pb.ClientDeliveryKind_CLIENT_DELIVERY_KIND_TRANSIENT,
 					DeliveryMode: deliveryModeToProto(input.DeliveryMode),
@@ -665,8 +655,7 @@ func (c *Client) connectAndServe() error {
 	loginEnv := &pb.ClientEnvelope{
 		Body: &pb.ClientEnvelope_Login{
 			Login: &pb.LoginRequest{
-				NodeId:       c.cfg.Credentials.NodeID,
-				UserId:       c.cfg.Credentials.UserID,
+				User:         userRefToProto(UserRef{NodeID: c.cfg.Credentials.NodeID, UserID: c.cfg.Credentials.UserID}),
 				Password:     c.cfg.Credentials.Password,
 				SeenMessages: make([]*pb.MessageCursor, 0, len(seen)),
 			},
@@ -819,8 +808,7 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 	case *pb.ServerEnvelope_DeleteUserResponse:
 		c.resolvePending(body.DeleteUserResponse.RequestId, requestResult{value: DeleteUserResult{
 			Status: body.DeleteUserResponse.Status,
-			NodeID: body.DeleteUserResponse.NodeId,
-			UserID: body.DeleteUserResponse.UserId,
+			User:   userRefFromProto(body.DeleteUserResponse.User),
 		}})
 	case *pb.ServerEnvelope_ListMessagesResponse:
 		c.resolvePending(body.ListMessagesResponse.RequestId, requestResult{value: messagesFromProto(body.ListMessagesResponse.Items)})
