@@ -90,8 +90,11 @@ func NewClient(cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		return nil, fmt.Errorf("base URL is required")
 	}
-	if cfg.Credentials.NodeID == 0 || cfg.Credentials.UserID == 0 || cfg.Credentials.Password == "" {
+	if cfg.Credentials.NodeID == 0 || cfg.Credentials.UserID == 0 {
 		return nil, fmt.Errorf("credentials are required")
+	}
+	if err := cfg.Credentials.Password.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid credentials password: %w", err)
 	}
 	if cfg.CursorStore == nil {
 		cfg.CursorStore = NewMemoryCursorStore()
@@ -135,7 +138,15 @@ func (c *Client) HTTP() *HTTPClient {
 }
 
 func (c *Client) Login(ctx context.Context, nodeID, userID int64, password string) (string, error) {
-	return c.http.Login(ctx, nodeID, userID, password)
+	input, err := PlainPassword(password)
+	if err != nil {
+		return "", err
+	}
+	return c.http.LoginWithPassword(ctx, nodeID, userID, input)
+}
+
+func (c *Client) LoginWithPassword(ctx context.Context, nodeID, userID int64, password PasswordInput) (string, error) {
+	return c.http.LoginWithPassword(ctx, nodeID, userID, password)
 }
 
 func (c *Client) CreateUser(ctx context.Context, token string, req CreateUserRequest) (User, error) {
@@ -155,7 +166,7 @@ func (c *Client) CreateUser(ctx context.Context, token string, req CreateUserReq
 				CreateUser: &pb.CreateUserRequest{
 					RequestId:   requestID,
 					Username:    req.Username,
-					Password:    req.Password,
+					Password:    req.Password.WireValue(),
 					ProfileJson: append([]byte(nil), req.ProfileJSON...),
 					Role:        req.Role,
 				},
@@ -375,7 +386,7 @@ func (c *Client) UpdateUser(ctx context.Context, target UserRef, req UpdateUserR
 					RequestId:   requestID,
 					User:        userRefToProto(target),
 					Username:    optionalStringField(req.Username),
-					Password:    optionalStringField(req.Password),
+					Password:    optionalPasswordField(req.Password),
 					ProfileJson: optionalBytesField(req.ProfileJSON),
 					Role:        optionalStringField(req.Role),
 				},
@@ -701,7 +712,7 @@ func (c *Client) connectAndServe() error {
 		Body: &pb.ClientEnvelope_Login{
 			Login: &pb.LoginRequest{
 				User:         userRefToProto(UserRef{NodeID: c.cfg.Credentials.NodeID, UserID: c.cfg.Credentials.UserID}),
-				Password:     c.cfg.Credentials.Password,
+				Password:     c.cfg.Credentials.Password.WireValue(),
 				SeenMessages: make([]*pb.MessageCursor, 0, len(seen)),
 			},
 		},

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/crypto/bcrypt"
 
 	pb "github.com/tursom/turntf-go/internal/proto"
 )
@@ -24,6 +25,13 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode login request: %v", err)
 		}
+		password, _ := req["password"].(string)
+		if password == "root" {
+			t.Fatal("expected hashed login password")
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(password), []byte("root")); err != nil {
+			t.Fatalf("expected bcrypt password, got %v", err)
+		}
 		json.NewEncoder(w).Encode(map[string]any{"token": "admin-token"})
 	})
 	mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
@@ -33,6 +41,12 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		var req CreateUserRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode create user: %v", err)
+		}
+		if req.Password.WireValue() == "alice-password" {
+			t.Fatal("expected create user password to be hashed")
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(req.Password.WireValue()), []byte("alice-password")); err != nil {
+			t.Fatalf("expected bcrypt password, got %v", err)
 		}
 		json.NewEncoder(w).Encode(User{NodeID: 4096, UserID: 1025, Username: req.Username, Role: req.Role})
 	})
@@ -139,7 +153,7 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 
 	user, err := client.CreateUser(ctx, token, CreateUserRequest{
 		Username: "alice",
-		Password: "alice-password",
+		Password: MustPlainPassword("alice-password"),
 		Role:     "user",
 	})
 	if err != nil {
@@ -208,6 +222,17 @@ func TestHTTPClientListNodeLoggedInUsersRequiresNodeID(t *testing.T) {
 func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode login request: %v", err)
+		}
+		password, _ := req["password"].(string)
+		if password == "root" {
+			t.Fatal("expected hashed login password")
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(password), []byte("root")); err != nil {
+			t.Fatalf("expected bcrypt password, got %v", err)
+		}
 		json.NewEncoder(w).Encode(map[string]any{"token": "admin-token"})
 	})
 	mux.HandleFunc("/ws/client", func(w http.ResponseWriter, r *http.Request) {
@@ -234,6 +259,12 @@ func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 		if createReq.GetCreateUser().Username != "alice" {
 			t.Fatalf("unexpected create user request: %+v", createReq.GetCreateUser())
 		}
+		if createReq.GetCreateUser().Password == "alice-password" {
+			t.Fatal("expected ws create user password to be hashed")
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(createReq.GetCreateUser().Password), []byte("alice-password")); err != nil {
+			t.Fatalf("expected bcrypt password, got %v", err)
+		}
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
 			Body: &pb.ServerEnvelope_CreateUserResponse{
 				CreateUserResponse: &pb.CreateUserResponse{
@@ -253,7 +284,7 @@ func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 
 	client, err := NewClient(Config{
 		BaseURL:      server.URL,
-		Credentials:  Credentials{NodeID: 4096, UserID: 1025, Password: "alice-password"},
+		Credentials:  Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
 		PingInterval: time.Hour,
 	})
 	if err != nil {
@@ -278,7 +309,7 @@ func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 
 	user, err := client.CreateUser(ctx, token, CreateUserRequest{
 		Username: "alice",
-		Password: "alice-password",
+		Password: MustPlainPassword("alice-password"),
 		Role:     "user",
 	})
 	if err != nil {

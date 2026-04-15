@@ -79,7 +79,7 @@ func main() {
 		Credentials: turntf.Credentials{
 			NodeID:   4096,
 			UserID:   1025,
-			Password: "alice-password",
+			Password: turntf.MustPlainPassword("alice-password"),
 		},
 		CursorStore:           store{turntf.NewMemoryCursorStore()},
 		Handler:               handler{},
@@ -106,7 +106,7 @@ func main() {
 
 	_, err = client.CreateUser(ctx, token, turntf.CreateUserRequest{
 		Username: "alice",
-		Password: "alice-password",
+		Password: turntf.MustPlainPassword("alice-password"),
 		Role:     "user",
 	})
 	if err != nil {
@@ -146,7 +146,7 @@ func main() {
 
 	user, err := httpClient.CreateUser(ctx, token, turntf.CreateUserRequest{
 		Username: "alice",
-		Password: "alice-password",
+		Password: turntf.MustPlainPassword("alice-password"),
 		Role:     "user",
 	})
 	if err != nil {
@@ -180,7 +180,7 @@ client, err := turntf.NewClient(turntf.Config{...})
 - `BaseURL`
   传 `http://host:port` 或 `https://host:port` 即可，SDK 会自动拼成 `/ws/client`
 - `Credentials`
-  WebSocket 首帧登录使用的 `(node_id, user_id, password)`
+  WebSocket 首帧登录使用的 `(node_id, user_id, password)`；推荐传 `turntf.MustPlainPassword(...)` 或 `turntf.HashedPassword(...)`
 - `CursorStore`
   业务侧的消息持久化和游标持久化实现
 - `Handler`
@@ -219,6 +219,26 @@ type CursorStore interface {
 ```go
 store := turntf.NewMemoryCursorStore()
 ```
+
+## Demo YAML Runner
+
+仓库里现在带了一个只走 WebSocket 的 demo 运行器，可以用 YAML 在一个文件里编排多节点、多 session、并行收发测试。
+
+示例脚本见 [docs/examples/demo-cross-node.yaml](/root/dev/sys/turntf-go/docs/examples/demo-cross-node.yaml)。
+
+运行方式：
+
+```bash
+go run ./cmd/turntf-demo -f docs/examples/demo-cross-node.yaml
+```
+
+配置要点：
+
+- 顶层 `nodes` 定义可连接节点和 `base_url`
+- `sessions` 为每个登录连接指定目标节点、用户身份和可选 `seen_messages`
+- `script` 支持顺序步骤，以及 `parallel` + `barrier` 的并行收发验证
+- `request` 和 `expect_event` 都显式绑定 `session`
+- `body` / `profile_json` 这类 bytes 字段默认按文本写，需要 JSON 或二进制时显式声明 `format`
 
 ### `Handler`
 
@@ -305,7 +325,7 @@ token, err := httpClient.Login(ctx, 4096, 1, "root")
 ```go
 user, err := httpClient.CreateUser(ctx, token, turntf.CreateUserRequest{
 	Username: "alice",
-	Password: "alice-password",
+	Password: turntf.MustPlainPassword("alice-password"),
 	Role:     "user",
 })
 

@@ -50,11 +50,22 @@ func (c *HTTPClient) client() *http.Client {
 }
 
 func (c *HTTPClient) Login(ctx context.Context, nodeID, userID int64, password string) (string, error) {
+	input, err := PlainPassword(password)
+	if err != nil {
+		return "", err
+	}
+	return c.LoginWithPassword(ctx, nodeID, userID, input)
+}
+
+func (c *HTTPClient) LoginWithPassword(ctx context.Context, nodeID, userID int64, password PasswordInput) (string, error) {
 	var resp httpLoginResponse
+	if err := password.Validate(); err != nil {
+		return "", fmt.Errorf("invalid password: %w", err)
+	}
 	err := c.doJSON(ctx, http.MethodPost, "/auth/login", "", httpLoginRequest{
 		NodeID:   nodeID,
 		UserID:   userID,
-		Password: password,
+		Password: password.WireValue(),
 	}, http.StatusOK, &resp)
 	if err != nil {
 		return "", err

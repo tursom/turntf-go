@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/tursom/turntf-go/internal/proto"
@@ -99,6 +100,12 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 		if got := login.GetLogin().GetUser(); got == nil || got.NodeId != 4096 || got.UserId != 1025 {
 			t.Fatalf("unexpected login user: %+v", got)
 		}
+		if login.GetLogin().GetPassword() == "alice-password" {
+			t.Fatal("expected login password to be hashed")
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(login.GetLogin().GetPassword()), []byte("alice-password")); err != nil {
+			t.Fatalf("expected bcrypt password, got %v", err)
+		}
 		firstSeen = append([]*pb.MessageCursor(nil), login.GetLogin().SeenMessages...)
 
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
@@ -166,7 +173,7 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 
 	client, err := NewClient(Config{
 		BaseURL:        server.URL,
-		Credentials:    Credentials{NodeID: 4096, UserID: 1025, Password: "alice-password"},
+		Credentials:    Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
 		CursorStore:    store,
 		Handler:        handler,
 		RequestTimeout: 2 * time.Second,
@@ -249,7 +256,7 @@ func TestClientUnauthorizedStopsReconnect(t *testing.T) {
 
 	client, err := NewClient(Config{
 		BaseURL:               server.URL,
-		Credentials:           Credentials{NodeID: 4096, UserID: 1025, Password: "wrong"},
+		Credentials:           Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("wrong")},
 		Reconnect:             true,
 		InitialReconnectDelay: 10 * time.Millisecond,
 		MaxReconnectDelay:     20 * time.Millisecond,
@@ -345,7 +352,7 @@ func TestClientListClusterQueries(t *testing.T) {
 
 	client, err := NewClient(Config{
 		BaseURL:        server.URL,
-		Credentials:    Credentials{NodeID: 4096, UserID: 1025, Password: "alice-password"},
+		Credentials:    Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
 		RequestTimeout: 2 * time.Second,
 		PingInterval:   time.Hour,
 	})
@@ -388,7 +395,7 @@ func TestClientListClusterQueries(t *testing.T) {
 func TestClientListNodeLoggedInUsersRequiresNodeID(t *testing.T) {
 	client, err := NewClient(Config{
 		BaseURL:      "http://127.0.0.1:8080",
-		Credentials:  Credentials{NodeID: 4096, UserID: 1025, Password: "alice-password"},
+		Credentials:  Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
 		PingInterval: time.Hour,
 	})
 	if err != nil {
@@ -451,7 +458,7 @@ func TestClientReconnectUsesSeenMessages(t *testing.T) {
 
 	client, err := NewClient(Config{
 		BaseURL:               server.URL,
-		Credentials:           Credentials{NodeID: 4096, UserID: 1025, Password: "alice-password"},
+		Credentials:           Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
 		CursorStore:           store,
 		Reconnect:             true,
 		InitialReconnectDelay: 10 * time.Millisecond,
@@ -482,6 +489,115 @@ func TestClientReconnectUsesSeenMessages(t *testing.T) {
 		t.Fatalf("unexpected seen_messages on reconnect: %#v", secondSeen)
 	}
 	_ = client.Close()
+}
+
+func TestClientUsesProvidedHashedPasswordForWSLogin(t *testing.T) {
+	password := MustPlainPassword("secret")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		login := mustReadClientEnvelope(t, conn)
+		if got := login.GetLogin().GetPassword(); got != password.WireValue() {
+			t.Fatalf("expected hashed password to be sent unchanged, got %q", got)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
+					ProtocolVersion: "client-v1alpha1",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:      server.URL,
+		Credentials:  Credentials{NodeID: 4096, UserID: 1025, Password: HashedPassword(password.WireValue())},
+		PingInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+}
+
+func TestClientUpdateUserHashesPassword(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		_ = mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
+					ProtocolVersion: "client-v1alpha1",
+				},
+			},
+		})
+
+		updateReq := mustReadClientEnvelope(t, conn)
+		password := updateReq.GetUpdateUser().GetPassword().GetValue()
+		if password == "new-password" {
+			t.Fatal("expected update password to be hashed")
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(password), []byte("new-password")); err != nil {
+			t.Fatalf("expected bcrypt password, got %v", err)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_UpdateUserResponse{
+				UpdateUserResponse: &pb.UpdateUserResponse{
+					RequestId: updateReq.GetUpdateUser().GetRequestId(),
+					User: &pb.User{
+						NodeId:   4096,
+						UserId:   1025,
+						Username: "alice",
+						Role:     "user",
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:      server.URL,
+		Credentials:  Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
+		PingInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	passwordInput := MustPlainPassword("new-password")
+	if _, err := client.UpdateUser(ctx, UserRef{NodeID: 4096, UserID: 1025}, UpdateUserRequest{
+		Password: &passwordInput,
+	}); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
 }
 
 func appendIfMissing(in []MessageCursor, cursor MessageCursor) []MessageCursor {

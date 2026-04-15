@@ -1,0 +1,94 @@
+version: v1alpha1
+name: cross-node-send-receive
+description: alice connects to node_a and sends a message to bob on node_b
+
+defaults:
+  timeout: 5s
+  idle_timeout: 500ms
+  auto_ack_messages: true
+
+vars:
+  message_text: hello from yaml
+
+nodes:
+  node_a:
+    base_url: http://127.0.0.1:8080
+  node_b:
+    base_url: http://127.0.0.1:8081
+
+sessions:
+  alice:
+    node: node_a
+    user:
+      node_id: 4096
+      user_id: 1025
+      password:
+        source: plain
+        value: alice-password
+  bob:
+    node: node_b
+    user:
+      node_id: 8192
+      user_id: 2025
+      password:
+        source: plain
+        value: bob-password
+
+script:
+  - step: connect
+    session: alice
+    expect:
+      login:
+        user:
+          node_id: 4096
+          user_id: 1025
+
+  - step: connect
+    session: bob
+    expect:
+      login:
+        user:
+          node_id: 8192
+          user_id: 2025
+
+  - step: parallel
+    branches:
+      - name: sender
+        script:
+          - step: barrier
+            name: ready
+          - step: request
+            session: alice
+            action: send_message
+            request:
+              target:
+                node_id: 8192
+                user_id: 2025
+              body: ${message_text}
+            expect:
+              ok:
+                message:
+                  recipient:
+                    node_id: 8192
+                    user_id: 2025
+                  body: ${message_text}
+
+      - name: receiver
+        script:
+          - step: barrier
+            name: ready
+          - step: expect_event
+            session: bob
+            event: message_pushed
+            match:
+              message:
+                recipient:
+                  node_id: 8192
+                  user_id: 2025
+                body: ${message_text}
+
+  - step: close
+    session: alice
+
+  - step: close
+    session: bob

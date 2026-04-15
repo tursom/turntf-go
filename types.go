@@ -9,7 +9,7 @@ import (
 type Credentials struct {
 	NodeID   int64
 	UserID   int64
-	Password string
+	Password PasswordInput
 }
 
 type UserRef struct {
@@ -173,17 +173,17 @@ type SendPacketInput struct {
 }
 
 type CreateUserRequest struct {
-	Username    string `json:"username"`
-	Password    string `json:"password,omitempty"`
-	ProfileJSON []byte `json:"profile_json,omitempty"`
-	Role        string `json:"role"`
+	Username    string        `json:"username"`
+	Password    PasswordInput `json:"password,omitempty"`
+	ProfileJSON []byte        `json:"profile_json,omitempty"`
+	Role        string        `json:"role"`
 }
 
 type UpdateUserRequest struct {
-	Username    *string `json:"username,omitempty"`
-	Password    *string `json:"password,omitempty"`
-	ProfileJSON *[]byte `json:"profile_json,omitempty"`
-	Role        *string `json:"role,omitempty"`
+	Username    *string        `json:"username,omitempty"`
+	Password    *PasswordInput `json:"password,omitempty"`
+	ProfileJSON *[]byte        `json:"profile_json,omitempty"`
+	Role        *string        `json:"role,omitempty"`
 }
 
 func (m Message) Cursor() MessageCursor {
@@ -508,6 +508,13 @@ func optionalStringField(value *string) *pb.StringField {
 		return nil
 	}
 	return &pb.StringField{Value: *value}
+}
+
+func optionalPasswordField(value *PasswordInput) *pb.StringField {
+	if value == nil {
+		return nil
+	}
+	return &pb.StringField{Value: value.WireValue()}
 }
 
 func optionalBytesField(value *[]byte) *pb.BytesField {
