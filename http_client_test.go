@@ -38,23 +38,38 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
-		var req CreateUserRequest
+		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode create user: %v", err)
 		}
-		if req.Password.WireValue() == "alice-password" {
+		password, _ := req["password"].(string)
+		if password == "alice-password" {
 			t.Fatal("expected create user password to be hashed")
 		}
-		if err := bcrypt.CompareHashAndPassword([]byte(req.Password.WireValue()), []byte("alice-password")); err != nil {
+		if err := bcrypt.CompareHashAndPassword([]byte(password), []byte("alice-password")); err != nil {
 			t.Fatalf("expected bcrypt password, got %v", err)
 		}
-		json.NewEncoder(w).Encode(User{NodeID: 4096, UserID: 1025, Username: req.Username, Role: req.Role})
+		if _, ok := req["profile"]; !ok {
+			t.Fatal("expected profile field in create user request")
+		}
+		if _, ok := req["profile_json"]; ok {
+			t.Fatal("did not expect legacy profile_json field in create user request")
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"node_id":    4096,
+			"user_id":    1025,
+			"username":   req["username"],
+			"role":       req["role"],
+			"profile":    map[string]any{"tier": "gold"},
+			"created_at": "hlc-created",
+		})
 	})
 	mux.HandleFunc("/nodes/4096/users/1025/subscriptions", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusCreated)
 	})
 	mux.HandleFunc("/nodes/4096/users/1025/messages", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
@@ -65,14 +80,17 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 			if got := r.URL.Query().Get("limit"); got != "20" {
 				t.Fatalf("unexpected limit: %q", got)
 			}
-			json.NewEncoder(w).Encode([]Message{{
-				Recipient:    UserRef{NodeID: 4096, UserID: 1025},
-				NodeID:       4096,
-				Seq:          3,
-				Sender:       UserRef{NodeID: 4096, UserID: 1},
-				Body:         []byte{0xff, 0x00},
-				CreatedAtHLC: "hlc1",
-			}})
+			json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{
+					"recipient":  UserRef{NodeID: 4096, UserID: 1025},
+					"node_id":    4096,
+					"seq":        3,
+					"sender":     UserRef{NodeID: 4096, UserID: 1},
+					"body":       []byte{0xff, 0x00},
+					"created_at": "hlc1",
+				}},
+				"count": 1,
+			})
 		case http.MethodPost:
 			var raw map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
@@ -81,22 +99,29 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 			if raw["body"] != base64.StdEncoding.EncodeToString([]byte{0xff, 0x00}) {
 				t.Fatalf("body was not base64 encoded: %#v", raw["body"])
 			}
-			json.NewEncoder(w).Encode(Message{
-				Recipient:    UserRef{NodeID: 4096, UserID: 1025},
-				NodeID:       4096,
-				Seq:          4,
-				Sender:       UserRef{NodeID: 4096, UserID: 1},
-				Body:         []byte{0xff, 0x00},
-				CreatedAtHLC: "hlc2",
+			if raw["delivery_kind"] != nil {
+				t.Fatalf("unexpected persistent delivery kind: %#v", raw["delivery_kind"])
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"recipient":  UserRef{NodeID: 4096, UserID: 1025},
+				"node_id":    4096,
+				"seq":        4,
+				"sender":     UserRef{NodeID: 4096, UserID: 1},
+				"body":       []byte{0xff, 0x00},
+				"created_at": "hlc2",
 			})
 		default:
 			t.Fatalf("unexpected method: %s", r.Method)
 		}
 	})
-	mux.HandleFunc("/nodes/8192/users/3/messages", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/nodes/8192/users/1025/messages", func(w http.ResponseWriter, r *http.Request) {
 		var raw map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 			t.Fatalf("decode post packet: %v", err)
+		}
+		if raw["delivery_kind"] != "transient" {
+			t.Fatalf("unexpected delivery kind: %#v", raw["delivery_kind"])
 		}
 		if raw["delivery_mode"] != "route_retry" {
 			t.Fatalf("unexpected delivery mode: %#v", raw["delivery_mode"])
@@ -110,10 +135,10 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
-		json.NewEncoder(w).Encode([]ClusterNode{
+		json.NewEncoder(w).Encode(map[string]any{"nodes": []ClusterNode{
 			{NodeID: 4096, IsLocal: true},
-			{NodeID: 8192, IsLocal: false, ConfiguredURL: "ws://127.0.0.1:9081/internal/cluster/ws"},
-		})
+			{NodeID: 8192, IsLocal: false, ConfiguredURL: "ws://127.0.0.1:9081/internal/cluster/ws", Source: "discovered"},
+		}})
 	})
 	mux.HandleFunc("/cluster/nodes/4096/logged-in-users", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -122,9 +147,13 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
-		json.NewEncoder(w).Encode([]LoggedInUser{
-			{NodeID: 4096, UserID: 1025, Username: "alice"},
-			{NodeID: 4096, UserID: 1026, Username: "bob"},
+		json.NewEncoder(w).Encode(map[string]any{
+			"target_node_id": 4096,
+			"items": []LoggedInUser{
+				{NodeID: 4096, UserID: 1025, Username: "alice"},
+				{NodeID: 4096, UserID: 1026, Username: "bob"},
+			},
+			"count": 2,
 		})
 	})
 	mux.HandleFunc("/cluster/nodes/8192/logged-in-users", func(w http.ResponseWriter, r *http.Request) {
@@ -134,7 +163,56 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
-		json.NewEncoder(w).Encode([]LoggedInUser{})
+		json.NewEncoder(w).Encode(map[string]any{"target_node_id": 8192, "items": []LoggedInUser{}, "count": 0})
+	})
+	mux.HandleFunc("/nodes/4096/users/1025/blacklist", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		switch r.Method {
+		case http.MethodPost:
+			var raw map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				t.Fatalf("decode block user: %v", err)
+			}
+			if raw["blocked_node_id"] != float64(4096) || raw["blocked_user_id"] != float64(1027) {
+				t.Fatalf("unexpected block request: %#v", raw)
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(BlacklistEntry{
+				Owner:        UserRef{NodeID: 4096, UserID: 1025},
+				Blocked:      UserRef{NodeID: 4096, UserID: 1027},
+				BlockedAt:    "hlc-blocked",
+				OriginNodeID: 4096,
+			})
+		case http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]any{
+				"items": []BlacklistEntry{{
+					Owner:        UserRef{NodeID: 4096, UserID: 1025},
+					Blocked:      UserRef{NodeID: 4096, UserID: 1027},
+					BlockedAt:    "hlc-blocked",
+					OriginNodeID: 4096,
+				}},
+				"count": 1,
+			})
+		default:
+			t.Fatalf("unexpected blacklist method: %s", r.Method)
+		}
+	})
+	mux.HandleFunc("/nodes/4096/users/1025/blacklist/4096/1027", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Fatalf("unexpected unblock method: %s", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		json.NewEncoder(w).Encode(BlacklistEntry{
+			Owner:        UserRef{NodeID: 4096, UserID: 1025},
+			Blocked:      UserRef{NodeID: 4096, UserID: 1027},
+			BlockedAt:    "hlc-blocked",
+			DeletedAt:    "hlc-unblocked",
+			OriginNodeID: 4096,
+		})
 	})
 
 	server := httptest.NewServer(mux)
@@ -152,15 +230,19 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 	}
 
 	user, err := client.CreateUser(ctx, token, CreateUserRequest{
-		Username: "alice",
-		Password: MustPlainPassword("alice-password"),
-		Role:     "user",
+		Username:    "alice",
+		Password:    MustPlainPassword("alice-password"),
+		ProfileJSON: []byte(`{"tier":"gold"}`),
+		Role:        "user",
 	})
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	if user.UserID != 1025 {
 		t.Fatalf("unexpected user: %+v", user)
+	}
+	if string(user.ProfileJSON) != `{"tier":"gold"}` {
+		t.Fatalf("unexpected profile json: %s", user.ProfileJSON)
 	}
 
 	if err := client.CreateSubscription(ctx, token, UserRef{NodeID: 4096, UserID: 1025}, UserRef{NodeID: 4096, UserID: 1026}); err != nil {
@@ -173,6 +255,9 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 	}
 	if len(messages) != 1 || len(messages[0].Body) != 2 {
 		t.Fatalf("unexpected messages: %+v", messages)
+	}
+	if messages[0].CreatedAtHLC != "hlc1" {
+		t.Fatalf("unexpected message created_at: %+v", messages[0])
 	}
 
 	message, err := client.PostMessage(ctx, token, UserRef{NodeID: 4096, UserID: 1025}, []byte{0xff, 0x00})
@@ -191,7 +276,7 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListClusterNodes: %v", err)
 	}
-	if len(nodes) != 2 || !nodes[0].IsLocal || nodes[1].ConfiguredURL == "" {
+	if len(nodes) != 2 || !nodes[0].IsLocal || nodes[1].ConfiguredURL == "" || nodes[1].Source != "discovered" {
 		t.Fatalf("unexpected cluster nodes: %+v", nodes)
 	}
 
@@ -209,6 +294,30 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 	}
 	if len(emptyUsers) != 0 {
 		t.Fatalf("expected empty logged-in users, got %+v", emptyUsers)
+	}
+
+	entry, err := client.BlockUser(ctx, token, UserRef{NodeID: 4096, UserID: 1025}, UserRef{NodeID: 4096, UserID: 1027})
+	if err != nil {
+		t.Fatalf("BlockUser: %v", err)
+	}
+	if entry.Blocked.UserID != 1027 || entry.BlockedAt == "" {
+		t.Fatalf("unexpected block entry: %+v", entry)
+	}
+
+	blocked, err := client.ListBlockedUsers(ctx, token, UserRef{NodeID: 4096, UserID: 1025})
+	if err != nil {
+		t.Fatalf("ListBlockedUsers: %v", err)
+	}
+	if len(blocked) != 1 || blocked[0].Blocked.UserID != 1027 {
+		t.Fatalf("unexpected blocked users: %+v", blocked)
+	}
+
+	unblocked, err := client.UnblockUser(ctx, token, UserRef{NodeID: 4096, UserID: 1025}, UserRef{NodeID: 4096, UserID: 1027})
+	if err != nil {
+		t.Fatalf("UnblockUser: %v", err)
+	}
+	if unblocked.DeletedAt == "" {
+		t.Fatalf("expected deleted_at in unblock response: %+v", unblocked)
 	}
 }
 

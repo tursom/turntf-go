@@ -438,6 +438,39 @@ func (r *Runner) callAction(ctx context.Context, client *turntf.Client, action s
 		}
 		payload := listPayload(items)
 		return payload, map[string]any{"ok": payload}, nil
+	case "block_user":
+		owner, blocked, err := parseBlacklistRefs(reqMap)
+		if err != nil {
+			return nil, nil, err
+		}
+		entry, err := client.BlockUser(ctx, "", owner, blocked)
+		if err != nil {
+			return nil, nil, err
+		}
+		payload := map[string]any{"entry": normalizeValue(entry)}
+		return payload, map[string]any{"ok": payload}, nil
+	case "unblock_user":
+		owner, blocked, err := parseBlacklistRefs(reqMap)
+		if err != nil {
+			return nil, nil, err
+		}
+		entry, err := client.UnblockUser(ctx, "", owner, blocked)
+		if err != nil {
+			return nil, nil, err
+		}
+		payload := map[string]any{"entry": normalizeValue(entry)}
+		return payload, map[string]any{"ok": payload}, nil
+	case "list_blocked_users":
+		owner, err := parseUserRefField(reqMap, "owner")
+		if err != nil {
+			return nil, nil, err
+		}
+		items, err := client.ListBlockedUsers(ctx, "", owner)
+		if err != nil {
+			return nil, nil, err
+		}
+		payload := listPayload(items)
+		return payload, map[string]any{"ok": payload}, nil
 	case "list_events":
 		after, err := int64Field(reqMap, "after", false)
 		if err != nil {
@@ -757,6 +790,18 @@ func parseUpdateUser(values map[string]any) (turntf.UserRef, turntf.UpdateUserRe
 		req.Role = &value
 	}
 	return target, req, nil
+}
+
+func parseBlacklistRefs(values map[string]any) (turntf.UserRef, turntf.UserRef, error) {
+	owner, err := parseUserRefField(values, "owner")
+	if err != nil {
+		return turntf.UserRef{}, turntf.UserRef{}, err
+	}
+	blocked, err := parseUserRefField(values, "blocked")
+	if err != nil {
+		return turntf.UserRef{}, turntf.UserRef{}, err
+	}
+	return owner, blocked, nil
 }
 
 func parsePasswordValue(raw any) (turntf.PasswordInput, error) {

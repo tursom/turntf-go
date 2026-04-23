@@ -520,6 +520,97 @@ func (c *Client) ListSubscriptions(ctx context.Context, subscriber UserRef) ([]S
 	return items, nil
 }
 
+func (c *Client) BlockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
+	_ = token
+	var zero BlacklistEntry
+	if err := owner.validate(); err != nil {
+		return zero, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := blocked.validate(); err != nil {
+		return zero, fmt.Errorf("invalid blocked user: %w", err)
+	}
+
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_BlockUser{
+				BlockUser: &pb.BlockUserRequest{
+					RequestId: requestID,
+					Owner:     userRefToProto(owner),
+					Blocked:   userRefToProto(blocked),
+				},
+			},
+		}
+	})
+	if err != nil {
+		return zero, err
+	}
+
+	entry, ok := res.value.(BlacklistEntry)
+	if !ok {
+		return zero, &ProtocolError{Message: "missing entry in block_user_response"}
+	}
+	return entry, nil
+}
+
+func (c *Client) UnblockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
+	_ = token
+	var zero BlacklistEntry
+	if err := owner.validate(); err != nil {
+		return zero, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := blocked.validate(); err != nil {
+		return zero, fmt.Errorf("invalid blocked user: %w", err)
+	}
+
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_UnblockUser{
+				UnblockUser: &pb.UnblockUserRequest{
+					RequestId: requestID,
+					Owner:     userRefToProto(owner),
+					Blocked:   userRefToProto(blocked),
+				},
+			},
+		}
+	})
+	if err != nil {
+		return zero, err
+	}
+
+	entry, ok := res.value.(BlacklistEntry)
+	if !ok {
+		return zero, &ProtocolError{Message: "missing entry in unblock_user_response"}
+	}
+	return entry, nil
+}
+
+func (c *Client) ListBlockedUsers(ctx context.Context, token string, owner UserRef) ([]BlacklistEntry, error) {
+	_ = token
+	if err := owner.validate(); err != nil {
+		return nil, fmt.Errorf("invalid owner: %w", err)
+	}
+
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_ListBlockedUsers{
+				ListBlockedUsers: &pb.ListBlockedUsersRequest{
+					RequestId: requestID,
+					Owner:     userRefToProto(owner),
+				},
+			},
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	items, ok := res.value.([]BlacklistEntry)
+	if !ok {
+		return nil, &ProtocolError{Message: "missing items in list_blocked_users_response"}
+	}
+	return items, nil
+}
+
 func (c *Client) WSListMessages(ctx context.Context, target UserRef, limit int) ([]Message, error) {
 	if err := target.validate(); err != nil {
 		return nil, fmt.Errorf("invalid target: %w", err)
@@ -874,6 +965,12 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 		c.resolvePending(body.UnsubscribeChannelResponse.RequestId, requestResult{value: subscriptionFromProto(body.UnsubscribeChannelResponse.Subscription)})
 	case *pb.ServerEnvelope_ListSubscriptionsResponse:
 		c.resolvePending(body.ListSubscriptionsResponse.RequestId, requestResult{value: subscriptionsFromProto(body.ListSubscriptionsResponse.Items)})
+	case *pb.ServerEnvelope_BlockUserResponse:
+		c.resolvePending(body.BlockUserResponse.RequestId, requestResult{value: blacklistEntryFromProto(body.BlockUserResponse.Entry)})
+	case *pb.ServerEnvelope_UnblockUserResponse:
+		c.resolvePending(body.UnblockUserResponse.RequestId, requestResult{value: blacklistEntryFromProto(body.UnblockUserResponse.Entry)})
+	case *pb.ServerEnvelope_ListBlockedUsersResponse:
+		c.resolvePending(body.ListBlockedUsersResponse.RequestId, requestResult{value: blacklistEntriesFromProto(body.ListBlockedUsersResponse.Items)})
 	case *pb.ServerEnvelope_ListEventsResponse:
 		c.resolvePending(body.ListEventsResponse.RequestId, requestResult{value: eventsFromProto(body.ListEventsResponse.Items)})
 	case *pb.ServerEnvelope_ListClusterNodesResponse:

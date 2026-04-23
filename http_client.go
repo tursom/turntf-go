@@ -36,10 +36,97 @@ type httpSubscriptionRequest struct {
 	ChannelUserID int64 `json:"channel_user_id"`
 }
 
+type httpBlacklistRequest struct {
+	BlockedNodeID int64 `json:"blocked_node_id"`
+	BlockedUserID int64 `json:"blocked_user_id"`
+}
+
 type httpMessageRequest struct {
-	Body         []byte   `json:"body"`
-	RelayTarget  *UserRef `json:"relay_target,omitempty"`
-	DeliveryMode string   `json:"delivery_mode,omitempty"`
+	Body         []byte `json:"body"`
+	DeliveryKind string `json:"delivery_kind,omitempty"`
+	DeliveryMode string `json:"delivery_mode,omitempty"`
+}
+
+type httpCreateUserRequest struct {
+	Username string          `json:"username"`
+	Password string          `json:"password,omitempty"`
+	Profile  json.RawMessage `json:"profile,omitempty"`
+	Role     string          `json:"role"`
+}
+
+type httpUserResponse struct {
+	NodeID         int64           `json:"node_id"`
+	UserID         int64           `json:"user_id"`
+	Username       string          `json:"username"`
+	Role           string          `json:"role"`
+	Profile        json.RawMessage `json:"profile,omitempty"`
+	ProfileJSON    json.RawMessage `json:"profile_json,omitempty"`
+	SystemReserved bool            `json:"system_reserved"`
+	CreatedAt      string          `json:"created_at,omitempty"`
+	UpdatedAt      string          `json:"updated_at,omitempty"`
+	OriginNodeID   int64           `json:"origin_node_id"`
+}
+
+type httpMessageResponse struct {
+	Recipient    UserRef `json:"recipient"`
+	NodeID       int64   `json:"node_id"`
+	Seq          int64   `json:"seq"`
+	Sender       UserRef `json:"sender"`
+	Body         []byte  `json:"body"`
+	CreatedAt    string  `json:"created_at,omitempty"`
+	CreatedAtHLC string  `json:"created_at_hlc,omitempty"`
+}
+
+type httpMessagesResponse struct {
+	Items []httpMessageResponse `json:"items"`
+	Count int                   `json:"count"`
+}
+
+func (r *httpMessagesResponse) UnmarshalJSON(data []byte) error {
+	if isJSONArray(data) {
+		return json.Unmarshal(data, &r.Items)
+	}
+	type alias httpMessagesResponse
+	return json.Unmarshal(data, (*alias)(r))
+}
+
+type httpClusterNodesResponse struct {
+	Nodes []ClusterNode `json:"nodes"`
+}
+
+func (r *httpClusterNodesResponse) UnmarshalJSON(data []byte) error {
+	if isJSONArray(data) {
+		return json.Unmarshal(data, &r.Nodes)
+	}
+	type alias httpClusterNodesResponse
+	return json.Unmarshal(data, (*alias)(r))
+}
+
+type httpNodeLoggedInUsersResponse struct {
+	TargetNodeID int64          `json:"target_node_id"`
+	Items        []LoggedInUser `json:"items"`
+	Count        int            `json:"count"`
+}
+
+func (r *httpNodeLoggedInUsersResponse) UnmarshalJSON(data []byte) error {
+	if isJSONArray(data) {
+		return json.Unmarshal(data, &r.Items)
+	}
+	type alias httpNodeLoggedInUsersResponse
+	return json.Unmarshal(data, (*alias)(r))
+}
+
+type httpBlockedUsersResponse struct {
+	Items []BlacklistEntry `json:"items"`
+	Count int              `json:"count"`
+}
+
+func (r *httpBlockedUsersResponse) UnmarshalJSON(data []byte) error {
+	if isJSONArray(data) {
+		return json.Unmarshal(data, &r.Items)
+	}
+	type alias httpBlockedUsersResponse
+	return json.Unmarshal(data, (*alias)(r))
 }
 
 func (c *HTTPClient) client() *http.Client {
@@ -66,7 +153,7 @@ func (c *HTTPClient) LoginWithPassword(ctx context.Context, nodeID, userID int64
 		NodeID:   nodeID,
 		UserID:   userID,
 		Password: password.WireValue(),
-	}, http.StatusOK, &resp)
+	}, &resp, http.StatusOK)
 	if err != nil {
 		return "", err
 	}
@@ -77,15 +164,23 @@ func (c *HTTPClient) LoginWithPassword(ctx context.Context, nodeID, userID int64
 }
 
 func (c *HTTPClient) CreateUser(ctx context.Context, token string, req CreateUserRequest) (User, error) {
-	var user User
+	var resp httpUserResponse
 	if req.Username == "" {
-		return user, fmt.Errorf("username is required")
+		return User{}, fmt.Errorf("username is required")
 	}
 	if req.Role == "" {
-		return user, fmt.Errorf("role is required")
+		return User{}, fmt.Errorf("role is required")
 	}
-	err := c.doJSON(ctx, http.MethodPost, "/users", token, req, http.StatusOK, &user)
-	return user, err
+	err := c.doJSON(ctx, http.MethodPost, "/users", token, httpCreateUserRequest{
+		Username: req.Username,
+		Password: req.Password.WireValue(),
+		Profile:  json.RawMessage(req.ProfileJSON),
+		Role:     req.Role,
+	}, &resp, http.StatusCreated, http.StatusOK)
+	if err != nil {
+		return User{}, err
+	}
+	return userFromHTTP(resp), nil
 }
 
 func (c *HTTPClient) CreateChannel(ctx context.Context, token string, req CreateUserRequest) (User, error) {
@@ -107,7 +202,7 @@ func (c *HTTPClient) CreateSubscription(ctx context.Context, token string, userR
 		ChannelNodeID: channelRef.NodeID,
 		ChannelUserID: channelRef.UserID,
 	}
-	return c.doJSON(ctx, http.MethodPost, path, token, req, http.StatusOK, nil)
+	return c.doJSON(ctx, http.MethodPost, path, token, req, nil, http.StatusCreated, http.StatusOK)
 }
 
 func (c *HTTPClient) ListMessages(ctx context.Context, token string, target UserRef, limit int) ([]Message, error) {
@@ -123,24 +218,27 @@ func (c *HTTPClient) ListMessages(ctx context.Context, token string, target User
 		path += "?" + encoded
 	}
 
-	var messages []Message
-	err := c.doJSON(ctx, http.MethodGet, path, token, nil, http.StatusOK, &messages)
-	return messages, err
+	var resp httpMessagesResponse
+	err := c.doJSON(ctx, http.MethodGet, path, token, nil, &resp, http.StatusOK)
+	return messagesFromHTTP(resp.Items), err
 }
 
 func (c *HTTPClient) PostMessage(ctx context.Context, token string, target UserRef, body []byte) (Message, error) {
-	var message Message
+	var resp httpMessageResponse
 	if err := target.validate(); err != nil {
-		return message, fmt.Errorf("invalid target: %w", err)
+		return Message{}, fmt.Errorf("invalid target: %w", err)
 	}
 	if len(body) == 0 {
-		return message, fmt.Errorf("body is required")
+		return Message{}, fmt.Errorf("body is required")
 	}
 	path := fmt.Sprintf("/nodes/%d/users/%d/messages", target.NodeID, target.UserID)
 	err := c.doJSON(ctx, http.MethodPost, path, token, httpMessageRequest{
 		Body: body,
-	}, http.StatusOK, &message)
-	return message, err
+	}, &resp, http.StatusCreated, http.StatusOK)
+	if err != nil {
+		return Message{}, err
+	}
+	return messageFromHTTP(resp), nil
 }
 
 func (c *HTTPClient) PostPacket(ctx context.Context, token string, targetNodeID int64, relayTarget UserRef, body []byte, mode DeliveryMode) error {
@@ -157,18 +255,22 @@ func (c *HTTPClient) PostPacket(ctx context.Context, token string, targetNodeID 
 		return err
 	}
 
-	path := fmt.Sprintf("/nodes/%d/users/3/messages", targetNodeID)
+	if targetNodeID != relayTarget.NodeID {
+		return fmt.Errorf("target node ID %d does not match target user node_id %d", targetNodeID, relayTarget.NodeID)
+	}
+
+	path := fmt.Sprintf("/nodes/%d/users/%d/messages", relayTarget.NodeID, relayTarget.UserID)
 	return c.doJSON(ctx, http.MethodPost, path, token, httpMessageRequest{
 		Body:         body,
-		RelayTarget:  &relayTarget,
+		DeliveryKind: "transient",
 		DeliveryMode: string(mode),
-	}, http.StatusAccepted, nil)
+	}, nil, http.StatusAccepted)
 }
 
 func (c *HTTPClient) ListClusterNodes(ctx context.Context, token string) ([]ClusterNode, error) {
-	var nodes []ClusterNode
-	err := c.doJSON(ctx, http.MethodGet, "/cluster/nodes", token, nil, http.StatusOK, &nodes)
-	return nodes, err
+	var resp httpClusterNodesResponse
+	err := c.doJSON(ctx, http.MethodGet, "/cluster/nodes", token, nil, &resp, http.StatusOK)
+	return resp.Nodes, err
 }
 
 func (c *HTTPClient) ListNodeLoggedInUsers(ctx context.Context, token string, nodeID int64) ([]LoggedInUser, error) {
@@ -176,13 +278,55 @@ func (c *HTTPClient) ListNodeLoggedInUsers(ctx context.Context, token string, no
 		return nil, fmt.Errorf("node_id is required")
 	}
 
-	var users []LoggedInUser
+	var resp httpNodeLoggedInUsersResponse
 	path := fmt.Sprintf("/cluster/nodes/%d/logged-in-users", nodeID)
-	err := c.doJSON(ctx, http.MethodGet, path, token, nil, http.StatusOK, &users)
-	return users, err
+	err := c.doJSON(ctx, http.MethodGet, path, token, nil, &resp, http.StatusOK)
+	return resp.Items, err
 }
 
-func (c *HTTPClient) doJSON(ctx context.Context, method, path, token string, reqBody any, wantStatus int, out any) error {
+func (c *HTTPClient) BlockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
+	var entry BlacklistEntry
+	if err := owner.validate(); err != nil {
+		return entry, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := blocked.validate(); err != nil {
+		return entry, fmt.Errorf("invalid blocked user: %w", err)
+	}
+
+	path := fmt.Sprintf("/nodes/%d/users/%d/blacklist", owner.NodeID, owner.UserID)
+	err := c.doJSON(ctx, http.MethodPost, path, token, httpBlacklistRequest{
+		BlockedNodeID: blocked.NodeID,
+		BlockedUserID: blocked.UserID,
+	}, &entry, http.StatusCreated, http.StatusOK)
+	return entry, err
+}
+
+func (c *HTTPClient) UnblockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
+	var entry BlacklistEntry
+	if err := owner.validate(); err != nil {
+		return entry, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := blocked.validate(); err != nil {
+		return entry, fmt.Errorf("invalid blocked user: %w", err)
+	}
+
+	path := fmt.Sprintf("/nodes/%d/users/%d/blacklist/%d/%d", owner.NodeID, owner.UserID, blocked.NodeID, blocked.UserID)
+	err := c.doJSON(ctx, http.MethodDelete, path, token, nil, &entry, http.StatusOK)
+	return entry, err
+}
+
+func (c *HTTPClient) ListBlockedUsers(ctx context.Context, token string, owner UserRef) ([]BlacklistEntry, error) {
+	if err := owner.validate(); err != nil {
+		return nil, fmt.Errorf("invalid owner: %w", err)
+	}
+
+	var resp httpBlockedUsersResponse
+	path := fmt.Sprintf("/nodes/%d/users/%d/blacklist", owner.NodeID, owner.UserID)
+	err := c.doJSON(ctx, http.MethodGet, path, token, nil, &resp, http.StatusOK)
+	return resp.Items, err
+}
+
+func (c *HTTPClient) doJSON(ctx context.Context, method, path, token string, reqBody any, out any, wantStatuses ...int) error {
 	fullURL := strings.TrimRight(c.BaseURL, "/") + path
 	var body io.Reader
 	if reqBody != nil {
@@ -210,7 +354,7 @@ func (c *HTTPClient) doJSON(ctx context.Context, method, path, token string, req
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != wantStatus {
+	if !statusAllowed(resp.StatusCode, wantStatuses) {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return &ProtocolError{Message: fmt.Sprintf("unexpected HTTP status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))}
 	}
@@ -219,4 +363,62 @@ func (c *HTTPClient) doJSON(ctx context.Context, method, path, token string, req
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func statusAllowed(status int, allowed []int) bool {
+	if len(allowed) == 0 {
+		return status == http.StatusOK
+	}
+	for _, item := range allowed {
+		if status == item {
+			return true
+		}
+	}
+	return false
+}
+
+func isJSONArray(data []byte) bool {
+	trimmed := bytes.TrimSpace(data)
+	return len(trimmed) > 0 && trimmed[0] == '['
+}
+
+func userFromHTTP(in httpUserResponse) User {
+	profile := in.Profile
+	if len(profile) == 0 {
+		profile = in.ProfileJSON
+	}
+	return User{
+		NodeID:         in.NodeID,
+		UserID:         in.UserID,
+		Username:       in.Username,
+		Role:           in.Role,
+		ProfileJSON:    append([]byte(nil), profile...),
+		SystemReserved: in.SystemReserved,
+		CreatedAt:      in.CreatedAt,
+		UpdatedAt:      in.UpdatedAt,
+		OriginNodeID:   in.OriginNodeID,
+	}
+}
+
+func messageFromHTTP(in httpMessageResponse) Message {
+	createdAt := in.CreatedAtHLC
+	if createdAt == "" {
+		createdAt = in.CreatedAt
+	}
+	return Message{
+		Recipient:    in.Recipient,
+		NodeID:       in.NodeID,
+		Seq:          in.Seq,
+		Sender:       in.Sender,
+		Body:         append([]byte(nil), in.Body...),
+		CreatedAtHLC: createdAt,
+	}
+}
+
+func messagesFromHTTP(items []httpMessageResponse) []Message {
+	out := make([]Message, 0, len(items))
+	for _, item := range items {
+		out = append(out, messageFromHTTP(item))
+	}
+	return out
 }

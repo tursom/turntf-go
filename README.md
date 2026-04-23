@@ -23,7 +23,7 @@ go get github.com/tursom/turntf-go
 - `SendPacket`
 - `Ping`
 - HTTP 登录
-- WS 创建用户、订阅管理、查询消息、集群查询、发消息、发瞬时包
+- WS 创建用户、订阅管理、黑名单管理、查询消息、集群查询、发消息、发瞬时包
 
 ## 包内容
 
@@ -224,7 +224,10 @@ store := turntf.NewMemoryCursorStore()
 
 仓库里现在带了一个只走 WebSocket 的 demo 运行器，可以用 YAML 在一个文件里编排多节点、多 session、并行收发测试。
 
-示例脚本见 [docs/examples/demo-cross-node.yaml](/root/dev/sys/turntf-go/docs/examples/demo-cross-node.yaml)。
+示例脚本：
+
+- [docs/examples/demo-cross-node.yaml](docs/examples/demo-cross-node.yaml)：多 session 并行收发消息
+- [docs/examples/demo-admin-blacklist.yaml](docs/examples/demo-admin-blacklist.yaml)：黑名单管理与集群发现字段断言
 
 运行方式：
 
@@ -239,6 +242,7 @@ go run ./cmd/turntf-demo -f docs/examples/demo-cross-node.yaml
 - `script` 支持顺序步骤，以及 `parallel` + `barrier` 的并行收发验证
 - `request` 和 `expect_event` 都显式绑定 `session`
 - `body` / `profile_json` 这类 bytes 字段默认按文本写，需要 JSON 或二进制时显式声明 `format`
+- `request.action` 支持 `send_message`、`send_packet`、`ping`、用户管理、订阅管理、黑名单管理、事件/运维/集群查询
 
 ### `Handler`
 
@@ -268,6 +272,9 @@ if err := client.Connect(ctx); err != nil { ... }
 user, err := client.CreateUser(ctx, token, turntf.CreateUserRequest{...})
 err = client.CreateSubscription(ctx, token, userRef, channelRef)
 messages, err := client.ListMessages(ctx, token, target, 20)
+entry, err := client.BlockUser(ctx, token, owner, blocked)
+blockedUsers, err := client.ListBlockedUsers(ctx, token, owner)
+entry, err = client.UnblockUser(ctx, token, owner, blocked)
 nodes, err := client.ListClusterNodes(ctx)
 users, err := client.ListNodeLoggedInUsers(ctx, 4096)
 message, err := client.PostMessage(ctx, token, target, payload)
@@ -413,7 +420,7 @@ if errors.As(err, &serverErr) {
 
 ## 重新生成 protobuf
 
-仓库里已经带上了生成后的文件。如果你修改了 [proto/client.proto](/root/dev/sys/turntf-go/proto/client.proto)，可以重新生成：
+仓库里已经带上了生成后的文件。如果你修改了 [proto/client.proto](proto/client.proto)，可以重新生成：
 
 ```bash
 go generate ./...

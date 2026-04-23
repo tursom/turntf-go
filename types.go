@@ -77,6 +77,14 @@ type Subscription struct {
 	OriginNodeID int64   `json:"origin_node_id"`
 }
 
+type BlacklistEntry struct {
+	Owner        UserRef `json:"owner"`
+	Blocked      UserRef `json:"blocked"`
+	BlockedAt    string  `json:"blocked_at,omitempty"`
+	DeletedAt    string  `json:"deleted_at,omitempty"`
+	OriginNodeID int64   `json:"origin_node_id"`
+}
+
 type Event struct {
 	Sequence        int64  `json:"sequence"`
 	EventID         int64  `json:"event_id"`
@@ -93,6 +101,7 @@ type ClusterNode struct {
 	NodeID        int64  `json:"node_id"`
 	IsLocal       bool   `json:"is_local"`
 	ConfiguredURL string `json:"configured_url,omitempty"`
+	Source        string `json:"source,omitempty"`
 }
 
 type LoggedInUser struct {
@@ -124,6 +133,12 @@ type PeerOriginStatus struct {
 type PeerStatus struct {
 	NodeID                    int64              `json:"node_id"`
 	ConfiguredURL             string             `json:"configured_url,omitempty"`
+	Source                    string             `json:"source,omitempty"`
+	DiscoveredURL             string             `json:"discovered_url,omitempty"`
+	DiscoveryState            string             `json:"discovery_state,omitempty"`
+	LastDiscoveredAt          string             `json:"last_discovered_at,omitempty"`
+	LastConnectedAt           string             `json:"last_connected_at,omitempty"`
+	LastDiscoveryError        string             `json:"last_discovery_error,omitempty"`
 	Connected                 bool               `json:"connected"`
 	SessionDirection          string             `json:"session_direction,omitempty"`
 	Origins                   []PeerOriginStatus `json:"origins,omitempty"`
@@ -337,6 +352,19 @@ func subscriptionFromProto(in *pb.Subscription) Subscription {
 	}
 }
 
+func blacklistEntryFromProto(in *pb.BlacklistEntry) BlacklistEntry {
+	if in == nil {
+		return BlacklistEntry{}
+	}
+	return BlacklistEntry{
+		Owner:        userRefFromProto(in.Owner),
+		Blocked:      userRefFromProto(in.Blocked),
+		BlockedAt:    in.BlockedAt,
+		DeletedAt:    in.DeletedAt,
+		OriginNodeID: in.OriginNodeId,
+	}
+}
+
 func eventFromProto(in *pb.Event) Event {
 	if in == nil {
 		return Event{}
@@ -362,6 +390,7 @@ func clusterNodeFromProto(in *pb.ClusterNode) ClusterNode {
 		NodeID:        in.NodeId,
 		IsLocal:       in.IsLocal,
 		ConfiguredURL: in.ConfiguredUrl,
+		Source:        in.Source,
 	}
 }
 
@@ -446,6 +475,12 @@ func peerStatusFromProto(in *pb.PeerStatus) PeerStatus {
 	return PeerStatus{
 		NodeID:                    in.NodeId,
 		ConfiguredURL:             in.ConfiguredUrl,
+		Source:                    in.Source,
+		DiscoveredURL:             in.DiscoveredUrl,
+		DiscoveryState:            in.DiscoveryState,
+		LastDiscoveredAt:          in.LastDiscoveredAt,
+		LastConnectedAt:           in.LastConnectedAt,
+		LastDiscoveryError:        in.LastDiscoveryError,
 		Connected:                 in.Connected,
 		SessionDirection:          in.SessionDirection,
 		Origins:                   origins,
@@ -475,6 +510,14 @@ func subscriptionsFromProto(items []*pb.Subscription) []Subscription {
 	out := make([]Subscription, 0, len(items))
 	for _, item := range items {
 		out = append(out, subscriptionFromProto(item))
+	}
+	return out
+}
+
+func blacklistEntriesFromProto(items []*pb.BlacklistEntry) []BlacklistEntry {
+	out := make([]BlacklistEntry, 0, len(items))
+	for _, item := range items {
+		out = append(out, blacklistEntryFromProto(item))
 	}
 	return out
 }

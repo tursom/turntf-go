@@ -223,6 +223,7 @@ ServerEnvelope {
 - 用户管理：`create_user`、`get_user`、`update_user`、`delete_user`
 - 消息与订阅查询：`list_messages`、`list_subscriptions`
 - 订阅管理：`subscribe_channel`、`unsubscribe_channel`
+- 黑名单管理：`block_user`、`unblock_user`、`list_blocked_users`
 - 集群与运维查询：`list_cluster_nodes`、`list_node_logged_in_users`、`list_events`、`operations_status`、`metrics`
 
 示例：管理员创建用户
@@ -298,11 +299,36 @@ ServerEnvelope {
 }
 ```
 
+示例：用户拉黑另一个用户
+
+```protobuf
+ClientEnvelope {
+  block_user: BlockUserRequest {
+    request_id: 1004
+    owner: { node_id: 4096, user_id: 1025 }
+    blocked: { node_id: 8192, user_id: 2025 }
+  }
+}
+```
+
+```protobuf
+ServerEnvelope {
+  block_user_response: BlockUserResponse {
+    request_id: 1004
+    entry: {
+      owner: { node_id: 4096, user_id: 1025 }
+      blocked: { node_id: 8192, user_id: 2025 }
+      blocked_at: "..."
+    }
+  }
+}
+```
+
 示例：普通用户查询已连接集群节点
 
 ```protobuf
 ClientEnvelope {
-  list_cluster_nodes: ListClusterNodesRequest { request_id: 1004 }
+  list_cluster_nodes: ListClusterNodesRequest { request_id: 1005 }
 }
 ```
 
@@ -311,7 +337,7 @@ ClientEnvelope {
 ```protobuf
 ClientEnvelope {
   list_node_logged_in_users: ListNodeLoggedInUsersRequest {
-    request_id: 1005
+    request_id: 1006
     node_id: 4096
   }
 }
@@ -320,7 +346,7 @@ ClientEnvelope {
 ```protobuf
 ServerEnvelope {
   list_node_logged_in_users_response: ListNodeLoggedInUsersResponse {
-    request_id: 1005
+    request_id: 1006
     target_node_id: 4096
     items: [
       { node_id: 4096, user_id: 1025, username: "alice" },
@@ -334,10 +360,10 @@ ServerEnvelope {
 ```protobuf
 ServerEnvelope {
   list_cluster_nodes_response: ListClusterNodesResponse {
-    request_id: 1004
+    request_id: 1005
     items: [
       { node_id: 4096, is_local: true },
-      { node_id: 8192, is_local: false, configured_url: "ws://127.0.0.1:9081/internal/cluster/ws" }
+      { node_id: 8192, is_local: false, configured_url: "ws://127.0.0.1:9081/internal/cluster/ws", source: "discovered" }
     ]
     count: 2
   }
@@ -352,6 +378,7 @@ ServerEnvelope {
 - `get_user` 允许本人或管理员。
 - `list_messages` 对可登录用户允许本人或管理员；对 channel/broadcast 目标仅管理员可直接查询。
 - `subscribe_channel`、`unsubscribe_channel`、`list_subscriptions` 允许本人或管理员。
+- `block_user`、`unblock_user`、`list_blocked_users` 允许本人或管理员。
 - `send_message` 的权限规则保持不变。
 
 字段约定：

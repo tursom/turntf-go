@@ -306,6 +306,265 @@ script:
 	}
 }
 
+func TestRunScenarioBlacklistAndDiscoveryFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		login := mustReadClientEnvelope(t, conn)
+		if got := login.GetLogin().GetUser(); got.GetNodeId() != 4096 || got.GetUserId() != 1 {
+			t.Fatalf("unexpected admin login: %+v", got)
+		}
+		if login.GetLogin().GetPassword() == "root" {
+			t.Fatal("expected admin password to be hashed")
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(login.GetLogin().GetPassword()), []byte("root")); err != nil {
+			t.Fatalf("expected bcrypt password, got %v", err)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: 4096, UserId: 1, Username: "root", Role: "admin"},
+					ProtocolVersion: "client-v1alpha2",
+				},
+			},
+		})
+
+		blockReq := mustReadClientEnvelope(t, conn)
+		if blockReq.GetBlockUser().GetOwner().GetUserId() != 1025 || blockReq.GetBlockUser().GetBlocked().GetUserId() != 2025 {
+			t.Fatalf("unexpected block request: %+v", blockReq.GetBlockUser())
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_BlockUserResponse{
+				BlockUserResponse: &pb.BlockUserResponse{
+					RequestId: blockReq.GetBlockUser().GetRequestId(),
+					Entry: &pb.BlacklistEntry{
+						Owner:        &pb.UserRef{NodeId: 4096, UserId: 1025},
+						Blocked:      &pb.UserRef{NodeId: 8192, UserId: 2025},
+						BlockedAt:    "hlc-blocked",
+						OriginNodeId: 4096,
+					},
+				},
+			},
+		})
+
+		listReq := mustReadClientEnvelope(t, conn)
+		if listReq.GetListBlockedUsers().GetOwner().GetUserId() != 1025 {
+			t.Fatalf("unexpected list blocked request: %+v", listReq.GetListBlockedUsers())
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_ListBlockedUsersResponse{
+				ListBlockedUsersResponse: &pb.ListBlockedUsersResponse{
+					RequestId: listReq.GetListBlockedUsers().GetRequestId(),
+					Items: []*pb.BlacklistEntry{{
+						Owner:        &pb.UserRef{NodeId: 4096, UserId: 1025},
+						Blocked:      &pb.UserRef{NodeId: 8192, UserId: 2025},
+						BlockedAt:    "hlc-blocked",
+						OriginNodeId: 4096,
+					}},
+					Count: 1,
+				},
+			},
+		})
+
+		unblockReq := mustReadClientEnvelope(t, conn)
+		if unblockReq.GetUnblockUser().GetBlocked().GetUserId() != 2025 {
+			t.Fatalf("unexpected unblock request: %+v", unblockReq.GetUnblockUser())
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_UnblockUserResponse{
+				UnblockUserResponse: &pb.UnblockUserResponse{
+					RequestId: unblockReq.GetUnblockUser().GetRequestId(),
+					Entry: &pb.BlacklistEntry{
+						Owner:        &pb.UserRef{NodeId: 4096, UserId: 1025},
+						Blocked:      &pb.UserRef{NodeId: 8192, UserId: 2025},
+						BlockedAt:    "hlc-blocked",
+						DeletedAt:    "hlc-unblocked",
+						OriginNodeId: 4096,
+					},
+				},
+			},
+		})
+
+		nodesReq := mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_ListClusterNodesResponse{
+				ListClusterNodesResponse: &pb.ListClusterNodesResponse{
+					RequestId: nodesReq.GetListClusterNodes().GetRequestId(),
+					Items: []*pb.ClusterNode{
+						{NodeId: 4096, IsLocal: true},
+						{NodeId: 8192, IsLocal: false, ConfiguredUrl: "ws://127.0.0.1:8081/internal/cluster/ws", Source: "discovered"},
+					},
+					Count: 2,
+				},
+			},
+		})
+
+		opsReq := mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_OperationsStatusResponse{
+				OperationsStatusResponse: &pb.OperationsStatusResponse{
+					RequestId: opsReq.GetOperationsStatus().GetRequestId(),
+					Status: &pb.OperationsStatus{
+						NodeId: 4096,
+						Peers: []*pb.PeerStatus{{
+							NodeId:             8192,
+							Connected:          true,
+							Source:             "discovered",
+							DiscoveredUrl:      "ws://127.0.0.1:8081/internal/cluster/ws",
+							DiscoveryState:     "connected",
+							LastDiscoveredAt:   "hlc-discovered",
+							LastConnectedAt:    "hlc-connected",
+							LastDiscoveryError: "previous error",
+						}},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	scenario, err := Parse([]byte(`
+version: v1alpha1
+name: blacklist-and-discovery
+defaults:
+  timeout: 2s
+  auto_ack_messages: true
+vars:
+  owner_node: 4096
+  owner_user: 1025
+  blocked_node: 8192
+  blocked_user: 2025
+nodes:
+  node_a:
+    base_url: ` + server.URL + `
+sessions:
+  admin:
+    node: node_a
+    user:
+      node_id: 4096
+      user_id: 1
+      password:
+        source: plain
+        value: root
+script:
+  - step: connect
+    session: admin
+    expect:
+      login:
+        user:
+          node_id: 4096
+          user_id: 1
+        protocol_version: client-v1alpha2
+
+  - step: request
+    session: admin
+    action: block_user
+    request:
+      owner:
+        node_id: ${owner_node}
+        user_id: ${owner_user}
+      blocked:
+        node_id: ${blocked_node}
+        user_id: ${blocked_user}
+    expect:
+      ok:
+        entry:
+          owner:
+            node_id: ${owner_node}
+            user_id: ${owner_user}
+          blocked:
+            node_id: ${blocked_node}
+            user_id: ${blocked_user}
+          blocked_at: hlc-blocked
+
+  - step: request
+    session: admin
+    action: list_blocked_users
+    request:
+      owner:
+        node_id: ${owner_node}
+        user_id: ${owner_user}
+    expect:
+      ok:
+        count: 1
+        items:
+          - blocked:
+              node_id: ${blocked_node}
+              user_id: ${blocked_user}
+
+  - step: request
+    session: admin
+    action: unblock_user
+    request:
+      owner:
+        node_id: ${owner_node}
+        user_id: ${owner_user}
+      blocked:
+        node_id: ${blocked_node}
+        user_id: ${blocked_user}
+    expect:
+      ok:
+        entry:
+          deleted_at: hlc-unblocked
+
+  - step: request
+    session: admin
+    action: list_cluster_nodes
+    request: {}
+    expect:
+      ok:
+        count: 2
+        items:
+          - node_id: 4096
+            is_local: true
+          - node_id: 8192
+            source: discovered
+
+  - step: request
+    session: admin
+    action: operations_status
+    request: {}
+    expect:
+      ok:
+        status:
+          node_id: 4096
+          peers:
+            - node_id: 8192
+              source: discovered
+              discovery_state: connected
+              last_connected_at: hlc-connected
+
+  - step: close
+    session: admin
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out strings.Builder
+	if err := RunScenario(ctx, scenario, &out); err != nil {
+		t.Fatalf("RunScenario: %v\noutput:\n%s", err, out.String())
+	}
+	for _, want := range []string{
+		"request action=block_user ok",
+		"request action=list_blocked_users ok",
+		"request action=unblock_user ok",
+		"request action=list_cluster_nodes ok",
+		"request action=operations_status ok",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected log %q, got:\n%s", want, out.String())
+		}
+	}
+}
+
 func mustReadClientEnvelope(t *testing.T, conn *websocket.Conn) *pb.ClientEnvelope {
 	t.Helper()
 	_, payload, err := conn.Read(context.Background())

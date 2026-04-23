@@ -1,0 +1,116 @@
+version: v1alpha1
+name: admin-blacklist-and-discovery
+description: admin blocks a user, verifies blacklist state, and inspects cluster discovery fields
+
+defaults:
+  timeout: 5s
+  idle_timeout: 500ms
+  auto_ack_messages: true
+
+vars:
+  owner_node: 4096
+  owner_user: 1025
+  blocked_node: 8192
+  blocked_user: 2025
+
+nodes:
+  node_a:
+    base_url: http://127.0.0.1:8080
+
+sessions:
+  admin:
+    node: node_a
+    user:
+      node_id: 4096
+      user_id: 1
+      password:
+        source: plain
+        value: root
+
+script:
+  - step: connect
+    session: admin
+    expect:
+      login:
+        user:
+          node_id: 4096
+          user_id: 1
+
+  - step: request
+    session: admin
+    action: block_user
+    request:
+      owner:
+        node_id: ${owner_node}
+        user_id: ${owner_user}
+      blocked:
+        node_id: ${blocked_node}
+        user_id: ${blocked_user}
+    expect:
+      ok:
+        entry:
+          owner:
+            node_id: ${owner_node}
+            user_id: ${owner_user}
+          blocked:
+            node_id: ${blocked_node}
+            user_id: ${blocked_user}
+
+  - step: request
+    session: admin
+    action: list_blocked_users
+    request:
+      owner:
+        node_id: ${owner_node}
+        user_id: ${owner_user}
+    expect:
+      ok:
+        count: 1
+        items:
+          - blocked:
+              node_id: ${blocked_node}
+              user_id: ${blocked_user}
+
+  - step: request
+    session: admin
+    action: unblock_user
+    request:
+      owner:
+        node_id: ${owner_node}
+        user_id: ${owner_user}
+      blocked:
+        node_id: ${blocked_node}
+        user_id: ${blocked_user}
+    expect:
+      ok:
+        entry:
+          blocked:
+            node_id: ${blocked_node}
+            user_id: ${blocked_user}
+
+  - step: request
+    session: admin
+    action: list_cluster_nodes
+    request: {}
+    expect:
+      ok:
+        items:
+          - node_id: 4096
+            is_local: true
+          - node_id: 8192
+            source: discovered
+
+  - step: request
+    session: admin
+    action: operations_status
+    request: {}
+    expect:
+      ok:
+        status:
+          peers:
+            - node_id: 8192
+              source: discovered
+              discovery_state: connected
+
+  - step: close
+    session: admin

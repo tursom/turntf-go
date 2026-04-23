@@ -312,7 +312,7 @@ func TestClientListClusterQueries(t *testing.T) {
 					RequestId: nodesReq.GetListClusterNodes().GetRequestId(),
 					Items: []*pb.ClusterNode{
 						{NodeId: 4096, IsLocal: true},
-						{NodeId: 8192, IsLocal: false, ConfiguredUrl: "ws://127.0.0.1:9081/internal/cluster/ws"},
+						{NodeId: 8192, IsLocal: false, ConfiguredUrl: "ws://127.0.0.1:9081/internal/cluster/ws", Source: "discovered"},
 					},
 					Count: 2,
 				},
@@ -371,7 +371,7 @@ func TestClientListClusterQueries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListClusterNodes: %v", err)
 	}
-	if len(nodes) != 2 || !nodes[0].IsLocal || nodes[1].ConfiguredURL == "" {
+	if len(nodes) != 2 || !nodes[0].IsLocal || nodes[1].ConfiguredURL == "" || nodes[1].Source != "discovered" {
 		t.Fatalf("unexpected cluster nodes: %+v", nodes)
 	}
 
@@ -389,6 +389,159 @@ func TestClientListClusterQueries(t *testing.T) {
 	}
 	if len(emptyNodes) != 0 {
 		t.Fatalf("expected empty cluster nodes, got %+v", emptyNodes)
+	}
+}
+
+func TestClientBlacklistAndOperationsStatusRPCs(t *testing.T) {
+	owner := UserRef{NodeID: 4096, UserID: 1025}
+	blocked := UserRef{NodeID: 4096, UserID: 1027}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		_ = mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
+					ProtocolVersion: "client-v1alpha2",
+				},
+			},
+		})
+
+		blockReq := mustReadClientEnvelope(t, conn)
+		if blockReq.GetBlockUser().GetOwner().GetUserId() != owner.UserID || blockReq.GetBlockUser().GetBlocked().GetUserId() != blocked.UserID {
+			t.Fatalf("unexpected block request: %+v", blockReq.GetBlockUser())
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_BlockUserResponse{
+				BlockUserResponse: &pb.BlockUserResponse{
+					RequestId: blockReq.GetBlockUser().GetRequestId(),
+					Entry: &pb.BlacklistEntry{
+						Owner:        userRefToProto(owner),
+						Blocked:      userRefToProto(blocked),
+						BlockedAt:    "hlc-blocked",
+						OriginNodeId: 4096,
+					},
+				},
+			},
+		})
+
+		listReq := mustReadClientEnvelope(t, conn)
+		if listReq.GetListBlockedUsers().GetOwner().GetUserId() != owner.UserID {
+			t.Fatalf("unexpected list blocked request: %+v", listReq.GetListBlockedUsers())
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_ListBlockedUsersResponse{
+				ListBlockedUsersResponse: &pb.ListBlockedUsersResponse{
+					RequestId: listReq.GetListBlockedUsers().GetRequestId(),
+					Items: []*pb.BlacklistEntry{{
+						Owner:        userRefToProto(owner),
+						Blocked:      userRefToProto(blocked),
+						BlockedAt:    "hlc-blocked",
+						OriginNodeId: 4096,
+					}},
+					Count: 1,
+				},
+			},
+		})
+
+		unblockReq := mustReadClientEnvelope(t, conn)
+		if unblockReq.GetUnblockUser().GetBlocked().GetUserId() != blocked.UserID {
+			t.Fatalf("unexpected unblock request: %+v", unblockReq.GetUnblockUser())
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_UnblockUserResponse{
+				UnblockUserResponse: &pb.UnblockUserResponse{
+					RequestId: unblockReq.GetUnblockUser().GetRequestId(),
+					Entry: &pb.BlacklistEntry{
+						Owner:        userRefToProto(owner),
+						Blocked:      userRefToProto(blocked),
+						BlockedAt:    "hlc-blocked",
+						DeletedAt:    "hlc-unblocked",
+						OriginNodeId: 4096,
+					},
+				},
+			},
+		})
+
+		opsReq := mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_OperationsStatusResponse{
+				OperationsStatusResponse: &pb.OperationsStatusResponse{
+					RequestId: opsReq.GetOperationsStatus().GetRequestId(),
+					Status: &pb.OperationsStatus{
+						NodeId: 4096,
+						Peers: []*pb.PeerStatus{{
+							NodeId:             8192,
+							ConfiguredUrl:      "ws://127.0.0.1:9081/internal/cluster/ws",
+							Connected:          true,
+							Source:             "discovered",
+							DiscoveredUrl:      "ws://127.0.0.1:9081/internal/cluster/ws",
+							DiscoveryState:     "connected",
+							LastDiscoveredAt:   "hlc-discovered",
+							LastConnectedAt:    "hlc-connected",
+							LastDiscoveryError: "previous error",
+						}},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:        server.URL,
+		Credentials:    Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
+		RequestTimeout: 2 * time.Second,
+		PingInterval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	entry, err := client.BlockUser(ctx, "", owner, blocked)
+	if err != nil {
+		t.Fatalf("BlockUser: %v", err)
+	}
+	if entry.Blocked != blocked || entry.BlockedAt == "" {
+		t.Fatalf("unexpected block entry: %+v", entry)
+	}
+
+	items, err := client.ListBlockedUsers(ctx, "", owner)
+	if err != nil {
+		t.Fatalf("ListBlockedUsers: %v", err)
+	}
+	if len(items) != 1 || items[0].Blocked != blocked {
+		t.Fatalf("unexpected blocked users: %+v", items)
+	}
+
+	unblocked, err := client.UnblockUser(ctx, "", owner, blocked)
+	if err != nil {
+		t.Fatalf("UnblockUser: %v", err)
+	}
+	if unblocked.DeletedAt != "hlc-unblocked" {
+		t.Fatalf("unexpected unblock entry: %+v", unblocked)
+	}
+
+	status, err := client.OperationsStatus(ctx)
+	if err != nil {
+		t.Fatalf("OperationsStatus: %v", err)
+	}
+	if len(status.Peers) != 1 || status.Peers[0].Source != "discovered" || status.Peers[0].DiscoveryState != "connected" {
+		t.Fatalf("unexpected operations status: %+v", status)
 	}
 }
 
