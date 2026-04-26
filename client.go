@@ -50,6 +50,8 @@ type Config struct {
 	PingInterval          time.Duration
 	RequestTimeout        time.Duration
 	AckMessages           bool
+	TransientOnly         bool
+	RealtimeStream        bool
 }
 
 type Client struct {
@@ -802,9 +804,10 @@ func (c *Client) connectAndServe() error {
 	loginEnv := &pb.ClientEnvelope{
 		Body: &pb.ClientEnvelope_Login{
 			Login: &pb.LoginRequest{
-				User:         userRefToProto(UserRef{NodeID: c.cfg.Credentials.NodeID, UserID: c.cfg.Credentials.UserID}),
-				Password:     c.cfg.Credentials.Password.WireValue(),
-				SeenMessages: make([]*pb.MessageCursor, 0, len(seen)),
+				User:          userRefToProto(UserRef{NodeID: c.cfg.Credentials.NodeID, UserID: c.cfg.Credentials.UserID}),
+				Password:      c.cfg.Credentials.Password.WireValue(),
+				SeenMessages:  make([]*pb.MessageCursor, 0, len(seen)),
+				TransientOnly: c.cfg.TransientOnly,
 			},
 		},
 	}
@@ -856,7 +859,7 @@ func (c *Client) connectAndServe() error {
 }
 
 func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {
-	wsURL, err := websocketURL(c.cfg.BaseURL)
+	wsURL, err := websocketURL(c.cfg.BaseURL, c.cfg.RealtimeStream)
 	if err != nil {
 		return nil, err
 	}
@@ -1155,7 +1158,7 @@ func (c *Client) signalFirstConnect(err error) {
 	})
 }
 
-func websocketURL(base string) (string, error) {
+func websocketURL(base string, realtime bool) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", err
@@ -1169,10 +1172,14 @@ func websocketURL(base string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported base URL scheme %q", u.Scheme)
 	}
+	path := "/ws/client"
+	if realtime {
+		path = "/ws/realtime"
+	}
 	if u.Path == "" || u.Path == "/" {
-		u.Path = "/ws/client"
+		u.Path = path
 	} else {
-		u.Path = strings.TrimRight(u.Path, "/") + "/ws/client"
+		u.Path = strings.TrimRight(u.Path, "/") + path
 	}
 	u.RawQuery = ""
 	u.Fragment = ""
