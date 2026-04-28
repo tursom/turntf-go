@@ -194,7 +194,7 @@ func (c *Client) CreateChannel(ctx context.Context, token string, req CreateUser
 }
 
 func (c *Client) CreateSubscription(ctx context.Context, token string, userRef, channelRef UserRef) error {
-	_, err := c.SubscribeChannel(ctx, token, userRef, channelRef)
+	_, err := c.UpsertAttachment(ctx, userRef, channelRef, AttachmentTypeChannelSubscription, []byte("{}"))
 	return err
 }
 
@@ -433,23 +433,23 @@ func (c *Client) DeleteUser(ctx context.Context, target UserRef) (DeleteUserResu
 	return result, nil
 }
 
-func (c *Client) SubscribeChannel(ctx context.Context, token string, subscriber, channel UserRef) (Subscription, error) {
-	_ = token
-	var zero Subscription
-	if err := subscriber.validate(); err != nil {
-		return zero, fmt.Errorf("invalid subscriber: %w", err)
+func (c *Client) UpsertAttachment(ctx context.Context, owner, subject UserRef, attachmentType AttachmentType, configJSON []byte) (Attachment, error) {
+	var zero Attachment
+	if err := owner.validate(); err != nil {
+		return zero, fmt.Errorf("invalid owner: %w", err)
 	}
-	if err := channel.validate(); err != nil {
-		return zero, fmt.Errorf("invalid channel: %w", err)
+	if err := subject.validate(); err != nil {
+		return zero, fmt.Errorf("invalid subject: %w", err)
 	}
-
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
 		return &pb.ClientEnvelope{
-			Body: &pb.ClientEnvelope_SubscribeChannel{
-				SubscribeChannel: &pb.SubscribeChannelRequest{
-					RequestId:  requestID,
-					Subscriber: userRefToProto(subscriber),
-					Channel:    userRefToProto(channel),
+			Body: &pb.ClientEnvelope_UpsertUserAttachment{
+				UpsertUserAttachment: &pb.UpsertUserAttachmentRequest{
+					RequestId:      requestID,
+					Owner:          userRefToProto(owner),
+					Subject:        userRefToProto(subject),
+					AttachmentType: attachmentTypeToProto(attachmentType),
+					ConfigJson:     append([]byte(nil), configJSON...),
 				},
 			},
 		}
@@ -457,30 +457,29 @@ func (c *Client) SubscribeChannel(ctx context.Context, token string, subscriber,
 	if err != nil {
 		return zero, err
 	}
-
-	sub, ok := res.value.(Subscription)
+	attachment, ok := res.value.(Attachment)
 	if !ok {
-		return zero, &ProtocolError{Message: "missing subscription in subscribe_channel_response"}
+		return zero, &ProtocolError{Message: "missing attachment in upsert_user_attachment_response"}
 	}
-	return sub, nil
+	return attachment, nil
 }
 
-func (c *Client) UnsubscribeChannel(ctx context.Context, subscriber, channel UserRef) (Subscription, error) {
-	var zero Subscription
-	if err := subscriber.validate(); err != nil {
-		return zero, fmt.Errorf("invalid subscriber: %w", err)
+func (c *Client) DeleteAttachment(ctx context.Context, owner, subject UserRef, attachmentType AttachmentType) (Attachment, error) {
+	var zero Attachment
+	if err := owner.validate(); err != nil {
+		return zero, fmt.Errorf("invalid owner: %w", err)
 	}
-	if err := channel.validate(); err != nil {
-		return zero, fmt.Errorf("invalid channel: %w", err)
+	if err := subject.validate(); err != nil {
+		return zero, fmt.Errorf("invalid subject: %w", err)
 	}
-
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
 		return &pb.ClientEnvelope{
-			Body: &pb.ClientEnvelope_UnsubscribeChannel{
-				UnsubscribeChannel: &pb.UnsubscribeChannelRequest{
-					RequestId:  requestID,
-					Subscriber: userRefToProto(subscriber),
-					Channel:    userRefToProto(channel),
+			Body: &pb.ClientEnvelope_DeleteUserAttachment{
+				DeleteUserAttachment: &pb.DeleteUserAttachmentRequest{
+					RequestId:      requestID,
+					Owner:          userRefToProto(owner),
+					Subject:        userRefToProto(subject),
+					AttachmentType: attachmentTypeToProto(attachmentType),
 				},
 			},
 		}
@@ -488,25 +487,24 @@ func (c *Client) UnsubscribeChannel(ctx context.Context, subscriber, channel Use
 	if err != nil {
 		return zero, err
 	}
-
-	sub, ok := res.value.(Subscription)
+	attachment, ok := res.value.(Attachment)
 	if !ok {
-		return zero, &ProtocolError{Message: "missing subscription in unsubscribe_channel_response"}
+		return zero, &ProtocolError{Message: "missing attachment in delete_user_attachment_response"}
 	}
-	return sub, nil
+	return attachment, nil
 }
 
-func (c *Client) ListSubscriptions(ctx context.Context, subscriber UserRef) ([]Subscription, error) {
-	if err := subscriber.validate(); err != nil {
-		return nil, fmt.Errorf("invalid subscriber: %w", err)
+func (c *Client) ListAttachments(ctx context.Context, owner UserRef, attachmentType AttachmentType) ([]Attachment, error) {
+	if err := owner.validate(); err != nil {
+		return nil, fmt.Errorf("invalid owner: %w", err)
 	}
-
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
 		return &pb.ClientEnvelope{
-			Body: &pb.ClientEnvelope_ListSubscriptions{
-				ListSubscriptions: &pb.ListSubscriptionsRequest{
-					RequestId:  requestID,
-					Subscriber: userRefToProto(subscriber),
+			Body: &pb.ClientEnvelope_ListUserAttachments{
+				ListUserAttachments: &pb.ListUserAttachmentsRequest{
+					RequestId:      requestID,
+					Owner:          userRefToProto(owner),
+					AttachmentType: attachmentTypeToProto(attachmentType),
 				},
 			},
 		}
@@ -514,101 +512,105 @@ func (c *Client) ListSubscriptions(ctx context.Context, subscriber UserRef) ([]S
 	if err != nil {
 		return nil, err
 	}
-
-	items, ok := res.value.([]Subscription)
+	items, ok := res.value.([]Attachment)
 	if !ok {
-		return nil, &ProtocolError{Message: "missing items in list_subscriptions_response"}
+		return nil, &ProtocolError{Message: "missing items in list_user_attachments_response"}
+	}
+	return items, nil
+}
+
+func (c *Client) SubscribeChannel(ctx context.Context, token string, subscriber, channel UserRef) (Subscription, error) {
+	_ = token
+	attachment, err := c.UpsertAttachment(ctx, subscriber, channel, AttachmentTypeChannelSubscription, []byte("{}"))
+	if err != nil {
+		return Subscription{}, err
+	}
+	return subscriptionFromProto(&pb.Attachment{
+		Owner:        userRefToProto(attachment.Owner),
+		Subject:      userRefToProto(attachment.Subject),
+		AttachedAt:   attachment.AttachedAt,
+		DeletedAt:    attachment.DeletedAt,
+		OriginNodeId: attachment.OriginNodeID,
+	}), nil
+}
+
+func (c *Client) UnsubscribeChannel(ctx context.Context, subscriber, channel UserRef) (Subscription, error) {
+	attachment, err := c.DeleteAttachment(ctx, subscriber, channel, AttachmentTypeChannelSubscription)
+	if err != nil {
+		return Subscription{}, err
+	}
+	return subscriptionFromProto(&pb.Attachment{
+		Owner:        userRefToProto(attachment.Owner),
+		Subject:      userRefToProto(attachment.Subject),
+		AttachedAt:   attachment.AttachedAt,
+		DeletedAt:    attachment.DeletedAt,
+		OriginNodeId: attachment.OriginNodeID,
+	}), nil
+}
+
+func (c *Client) ListSubscriptions(ctx context.Context, subscriber UserRef) ([]Subscription, error) {
+	attachments, err := c.ListAttachments(ctx, subscriber, AttachmentTypeChannelSubscription)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]Subscription, 0, len(attachments))
+	for _, attachment := range attachments {
+		items = append(items, Subscription{
+			Subscriber:   attachment.Owner,
+			Channel:      attachment.Subject,
+			SubscribedAt: attachment.AttachedAt,
+			DeletedAt:    attachment.DeletedAt,
+			OriginNodeID: attachment.OriginNodeID,
+		})
 	}
 	return items, nil
 }
 
 func (c *Client) BlockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
 	_ = token
-	var zero BlacklistEntry
-	if err := owner.validate(); err != nil {
-		return zero, fmt.Errorf("invalid owner: %w", err)
-	}
-	if err := blocked.validate(); err != nil {
-		return zero, fmt.Errorf("invalid blocked user: %w", err)
-	}
-
-	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
-		return &pb.ClientEnvelope{
-			Body: &pb.ClientEnvelope_BlockUser{
-				BlockUser: &pb.BlockUserRequest{
-					RequestId: requestID,
-					Owner:     userRefToProto(owner),
-					Blocked:   userRefToProto(blocked),
-				},
-			},
-		}
-	})
+	attachment, err := c.UpsertAttachment(ctx, owner, blocked, AttachmentTypeUserBlacklist, []byte("{}"))
 	if err != nil {
-		return zero, err
+		return BlacklistEntry{}, err
 	}
-
-	entry, ok := res.value.(BlacklistEntry)
-	if !ok {
-		return zero, &ProtocolError{Message: "missing entry in block_user_response"}
-	}
-	return entry, nil
+	return blacklistEntryFromProto(&pb.Attachment{
+		Owner:        userRefToProto(attachment.Owner),
+		Subject:      userRefToProto(attachment.Subject),
+		AttachedAt:   attachment.AttachedAt,
+		DeletedAt:    attachment.DeletedAt,
+		OriginNodeId: attachment.OriginNodeID,
+	}), nil
 }
 
 func (c *Client) UnblockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
 	_ = token
-	var zero BlacklistEntry
-	if err := owner.validate(); err != nil {
-		return zero, fmt.Errorf("invalid owner: %w", err)
-	}
-	if err := blocked.validate(); err != nil {
-		return zero, fmt.Errorf("invalid blocked user: %w", err)
-	}
-
-	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
-		return &pb.ClientEnvelope{
-			Body: &pb.ClientEnvelope_UnblockUser{
-				UnblockUser: &pb.UnblockUserRequest{
-					RequestId: requestID,
-					Owner:     userRefToProto(owner),
-					Blocked:   userRefToProto(blocked),
-				},
-			},
-		}
-	})
+	attachment, err := c.DeleteAttachment(ctx, owner, blocked, AttachmentTypeUserBlacklist)
 	if err != nil {
-		return zero, err
+		return BlacklistEntry{}, err
 	}
-
-	entry, ok := res.value.(BlacklistEntry)
-	if !ok {
-		return zero, &ProtocolError{Message: "missing entry in unblock_user_response"}
-	}
-	return entry, nil
+	return blacklistEntryFromProto(&pb.Attachment{
+		Owner:        userRefToProto(attachment.Owner),
+		Subject:      userRefToProto(attachment.Subject),
+		AttachedAt:   attachment.AttachedAt,
+		DeletedAt:    attachment.DeletedAt,
+		OriginNodeId: attachment.OriginNodeID,
+	}), nil
 }
 
 func (c *Client) ListBlockedUsers(ctx context.Context, token string, owner UserRef) ([]BlacklistEntry, error) {
 	_ = token
-	if err := owner.validate(); err != nil {
-		return nil, fmt.Errorf("invalid owner: %w", err)
-	}
-
-	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
-		return &pb.ClientEnvelope{
-			Body: &pb.ClientEnvelope_ListBlockedUsers{
-				ListBlockedUsers: &pb.ListBlockedUsersRequest{
-					RequestId: requestID,
-					Owner:     userRefToProto(owner),
-				},
-			},
-		}
-	})
+	attachments, err := c.ListAttachments(ctx, owner, AttachmentTypeUserBlacklist)
 	if err != nil {
 		return nil, err
 	}
-
-	items, ok := res.value.([]BlacklistEntry)
-	if !ok {
-		return nil, &ProtocolError{Message: "missing items in list_blocked_users_response"}
+	items := make([]BlacklistEntry, 0, len(attachments))
+	for _, attachment := range attachments {
+		items = append(items, BlacklistEntry{
+			Owner:        attachment.Owner,
+			Blocked:      attachment.Subject,
+			BlockedAt:    attachment.AttachedAt,
+			DeletedAt:    attachment.DeletedAt,
+			OriginNodeID: attachment.OriginNodeID,
+		})
 	}
 	return items, nil
 }
@@ -962,18 +964,12 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 		}})
 	case *pb.ServerEnvelope_ListMessagesResponse:
 		c.resolvePending(body.ListMessagesResponse.RequestId, requestResult{value: messagesFromProto(body.ListMessagesResponse.Items)})
-	case *pb.ServerEnvelope_SubscribeChannelResponse:
-		c.resolvePending(body.SubscribeChannelResponse.RequestId, requestResult{value: subscriptionFromProto(body.SubscribeChannelResponse.Subscription)})
-	case *pb.ServerEnvelope_UnsubscribeChannelResponse:
-		c.resolvePending(body.UnsubscribeChannelResponse.RequestId, requestResult{value: subscriptionFromProto(body.UnsubscribeChannelResponse.Subscription)})
-	case *pb.ServerEnvelope_ListSubscriptionsResponse:
-		c.resolvePending(body.ListSubscriptionsResponse.RequestId, requestResult{value: subscriptionsFromProto(body.ListSubscriptionsResponse.Items)})
-	case *pb.ServerEnvelope_BlockUserResponse:
-		c.resolvePending(body.BlockUserResponse.RequestId, requestResult{value: blacklistEntryFromProto(body.BlockUserResponse.Entry)})
-	case *pb.ServerEnvelope_UnblockUserResponse:
-		c.resolvePending(body.UnblockUserResponse.RequestId, requestResult{value: blacklistEntryFromProto(body.UnblockUserResponse.Entry)})
-	case *pb.ServerEnvelope_ListBlockedUsersResponse:
-		c.resolvePending(body.ListBlockedUsersResponse.RequestId, requestResult{value: blacklistEntriesFromProto(body.ListBlockedUsersResponse.Items)})
+	case *pb.ServerEnvelope_UpsertUserAttachmentResponse:
+		c.resolvePending(body.UpsertUserAttachmentResponse.RequestId, requestResult{value: attachmentFromProto(body.UpsertUserAttachmentResponse.Attachment)})
+	case *pb.ServerEnvelope_DeleteUserAttachmentResponse:
+		c.resolvePending(body.DeleteUserAttachmentResponse.RequestId, requestResult{value: attachmentFromProto(body.DeleteUserAttachmentResponse.Attachment)})
+	case *pb.ServerEnvelope_ListUserAttachmentsResponse:
+		c.resolvePending(body.ListUserAttachmentsResponse.RequestId, requestResult{value: attachmentsFromProto(body.ListUserAttachmentsResponse.Items)})
 	case *pb.ServerEnvelope_ListEventsResponse:
 		c.resolvePending(body.ListEventsResponse.RequestId, requestResult{value: eventsFromProto(body.ListEventsResponse.Items)})
 	case *pb.ServerEnvelope_ListClusterNodesResponse:

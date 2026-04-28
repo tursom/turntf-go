@@ -31,14 +31,8 @@ type httpLoginResponse struct {
 	Token string `json:"token"`
 }
 
-type httpSubscriptionRequest struct {
-	ChannelNodeID int64 `json:"channel_node_id"`
-	ChannelUserID int64 `json:"channel_user_id"`
-}
-
-type httpBlacklistRequest struct {
-	BlockedNodeID int64 `json:"blocked_node_id"`
-	BlockedUserID int64 `json:"blocked_user_id"`
+type httpAttachmentRequest struct {
+	ConfigJSON json.RawMessage `json:"config_json"`
 }
 
 type httpMessageRequest struct {
@@ -116,16 +110,16 @@ func (r *httpNodeLoggedInUsersResponse) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*alias)(r))
 }
 
-type httpBlockedUsersResponse struct {
-	Items []BlacklistEntry `json:"items"`
-	Count int              `json:"count"`
+type httpAttachmentsResponse struct {
+	Items []Attachment `json:"items"`
+	Count int          `json:"count"`
 }
 
-func (r *httpBlockedUsersResponse) UnmarshalJSON(data []byte) error {
+func (r *httpAttachmentsResponse) UnmarshalJSON(data []byte) error {
 	if isJSONArray(data) {
 		return json.Unmarshal(data, &r.Items)
 	}
-	type alias httpBlockedUsersResponse
+	type alias httpAttachmentsResponse
 	return json.Unmarshal(data, (*alias)(r))
 }
 
@@ -191,18 +185,8 @@ func (c *HTTPClient) CreateChannel(ctx context.Context, token string, req Create
 }
 
 func (c *HTTPClient) CreateSubscription(ctx context.Context, token string, userRef, channelRef UserRef) error {
-	if err := userRef.validate(); err != nil {
-		return fmt.Errorf("invalid user ref: %w", err)
-	}
-	if err := channelRef.validate(); err != nil {
-		return fmt.Errorf("invalid channel ref: %w", err)
-	}
-	path := fmt.Sprintf("/nodes/%d/users/%d/subscriptions", userRef.NodeID, userRef.UserID)
-	req := httpSubscriptionRequest{
-		ChannelNodeID: channelRef.NodeID,
-		ChannelUserID: channelRef.UserID,
-	}
-	return c.doJSON(ctx, http.MethodPost, path, token, req, nil, http.StatusCreated, http.StatusOK)
+	_, err := c.UpsertAttachment(ctx, token, userRef, channelRef, AttachmentTypeChannelSubscription, []byte("{}"))
+	return err
 }
 
 func (c *HTTPClient) ListMessages(ctx context.Context, token string, target UserRef, limit int) ([]Message, error) {
@@ -285,43 +269,88 @@ func (c *HTTPClient) ListNodeLoggedInUsers(ctx context.Context, token string, no
 }
 
 func (c *HTTPClient) BlockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
-	var entry BlacklistEntry
-	if err := owner.validate(); err != nil {
-		return entry, fmt.Errorf("invalid owner: %w", err)
+	attachment, err := c.UpsertAttachment(ctx, token, owner, blocked, AttachmentTypeUserBlacklist, []byte("{}"))
+	if err != nil {
+		return BlacklistEntry{}, err
 	}
-	if err := blocked.validate(); err != nil {
-		return entry, fmt.Errorf("invalid blocked user: %w", err)
-	}
-
-	path := fmt.Sprintf("/nodes/%d/users/%d/blacklist", owner.NodeID, owner.UserID)
-	err := c.doJSON(ctx, http.MethodPost, path, token, httpBlacklistRequest{
-		BlockedNodeID: blocked.NodeID,
-		BlockedUserID: blocked.UserID,
-	}, &entry, http.StatusCreated, http.StatusOK)
-	return entry, err
+	return BlacklistEntry{
+		Owner:        attachment.Owner,
+		Blocked:      attachment.Subject,
+		BlockedAt:    attachment.AttachedAt,
+		DeletedAt:    attachment.DeletedAt,
+		OriginNodeID: attachment.OriginNodeID,
+	}, nil
 }
 
 func (c *HTTPClient) UnblockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
-	var entry BlacklistEntry
-	if err := owner.validate(); err != nil {
-		return entry, fmt.Errorf("invalid owner: %w", err)
+	attachment, err := c.DeleteAttachment(ctx, token, owner, blocked, AttachmentTypeUserBlacklist)
+	if err != nil {
+		return BlacklistEntry{}, err
 	}
-	if err := blocked.validate(); err != nil {
-		return entry, fmt.Errorf("invalid blocked user: %w", err)
-	}
-
-	path := fmt.Sprintf("/nodes/%d/users/%d/blacklist/%d/%d", owner.NodeID, owner.UserID, blocked.NodeID, blocked.UserID)
-	err := c.doJSON(ctx, http.MethodDelete, path, token, nil, &entry, http.StatusOK)
-	return entry, err
+	return BlacklistEntry{
+		Owner:        attachment.Owner,
+		Blocked:      attachment.Subject,
+		BlockedAt:    attachment.AttachedAt,
+		DeletedAt:    attachment.DeletedAt,
+		OriginNodeID: attachment.OriginNodeID,
+	}, nil
 }
 
 func (c *HTTPClient) ListBlockedUsers(ctx context.Context, token string, owner UserRef) ([]BlacklistEntry, error) {
+	attachments, err := c.ListAttachments(ctx, token, owner, AttachmentTypeUserBlacklist)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]BlacklistEntry, 0, len(attachments))
+	for _, attachment := range attachments {
+		items = append(items, BlacklistEntry{
+			Owner:        attachment.Owner,
+			Blocked:      attachment.Subject,
+			BlockedAt:    attachment.AttachedAt,
+			DeletedAt:    attachment.DeletedAt,
+			OriginNodeID: attachment.OriginNodeID,
+		})
+	}
+	return items, nil
+}
+
+func (c *HTTPClient) UpsertAttachment(ctx context.Context, token string, owner, subject UserRef, attachmentType AttachmentType, configJSON []byte) (Attachment, error) {
+	var attachment Attachment
+	if err := owner.validate(); err != nil {
+		return attachment, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := subject.validate(); err != nil {
+		return attachment, fmt.Errorf("invalid subject: %w", err)
+	}
+	path := fmt.Sprintf("/nodes/%d/users/%d/attachments/%s/%d/%d", owner.NodeID, owner.UserID, attachmentType, subject.NodeID, subject.UserID)
+	err := c.doJSON(ctx, http.MethodPut, path, token, httpAttachmentRequest{
+		ConfigJSON: append([]byte(nil), configJSON...),
+	}, &attachment, http.StatusCreated, http.StatusOK)
+	return attachment, err
+}
+
+func (c *HTTPClient) DeleteAttachment(ctx context.Context, token string, owner, subject UserRef, attachmentType AttachmentType) (Attachment, error) {
+	var attachment Attachment
+	if err := owner.validate(); err != nil {
+		return attachment, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := subject.validate(); err != nil {
+		return attachment, fmt.Errorf("invalid subject: %w", err)
+	}
+	path := fmt.Sprintf("/nodes/%d/users/%d/attachments/%s/%d/%d", owner.NodeID, owner.UserID, attachmentType, subject.NodeID, subject.UserID)
+	err := c.doJSON(ctx, http.MethodDelete, path, token, nil, &attachment, http.StatusOK)
+	return attachment, err
+}
+
+func (c *HTTPClient) ListAttachments(ctx context.Context, token string, owner UserRef, attachmentType AttachmentType) ([]Attachment, error) {
 	if err := owner.validate(); err != nil {
 		return nil, fmt.Errorf("invalid owner: %w", err)
 	}
-
-	var resp httpBlockedUsersResponse
-	path := fmt.Sprintf("/nodes/%d/users/%d/blacklist", owner.NodeID, owner.UserID)
+	var resp httpAttachmentsResponse
+	path := fmt.Sprintf("/nodes/%d/users/%d/attachments", owner.NodeID, owner.UserID)
+	if attachmentType != "" {
+		path += "?attachment_type=" + url.QueryEscape(string(attachmentType))
+	}
 	err := c.doJSON(ctx, http.MethodGet, path, token, nil, &resp, http.StatusOK)
 	return resp.Items, err
 }

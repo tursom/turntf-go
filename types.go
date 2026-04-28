@@ -69,6 +69,25 @@ type RelayAccepted struct {
 	DeliveryMode DeliveryMode `json:"delivery_mode"`
 }
 
+type AttachmentType string
+
+const (
+	AttachmentTypeChannelManager      AttachmentType = "channel_manager"
+	AttachmentTypeChannelWriter       AttachmentType = "channel_writer"
+	AttachmentTypeChannelSubscription AttachmentType = "channel_subscription"
+	AttachmentTypeUserBlacklist       AttachmentType = "user_blacklist"
+)
+
+type Attachment struct {
+	Owner          UserRef        `json:"owner"`
+	Subject        UserRef        `json:"subject"`
+	AttachmentType AttachmentType `json:"attachment_type"`
+	ConfigJSON     []byte         `json:"config_json,omitempty"`
+	AttachedAt     string         `json:"attached_at,omitempty"`
+	DeletedAt      string         `json:"deleted_at,omitempty"`
+	OriginNodeID   int64          `json:"origin_node_id"`
+}
+
 type Subscription struct {
 	Subscriber   UserRef `json:"subscriber"`
 	Channel      UserRef `json:"channel"`
@@ -339,29 +358,70 @@ func relayAcceptedFromProto(in *pb.TransientAccepted) RelayAccepted {
 	}
 }
 
-func subscriptionFromProto(in *pb.Subscription) Subscription {
-	if in == nil {
-		return Subscription{}
-	}
-	return Subscription{
-		Subscriber:   userRefFromProto(in.Subscriber),
-		Channel:      userRefFromProto(in.Channel),
-		SubscribedAt: in.SubscribedAt,
-		DeletedAt:    in.DeletedAt,
-		OriginNodeID: in.OriginNodeId,
+func attachmentTypeToProto(in AttachmentType) pb.AttachmentType {
+	switch in {
+	case AttachmentTypeChannelManager:
+		return pb.AttachmentType_ATTACHMENT_TYPE_CHANNEL_MANAGER
+	case AttachmentTypeChannelWriter:
+		return pb.AttachmentType_ATTACHMENT_TYPE_CHANNEL_WRITER
+	case AttachmentTypeChannelSubscription:
+		return pb.AttachmentType_ATTACHMENT_TYPE_CHANNEL_SUBSCRIPTION
+	case AttachmentTypeUserBlacklist:
+		return pb.AttachmentType_ATTACHMENT_TYPE_USER_BLACKLIST
+	default:
+		return pb.AttachmentType_ATTACHMENT_TYPE_UNSPECIFIED
 	}
 }
 
-func blacklistEntryFromProto(in *pb.BlacklistEntry) BlacklistEntry {
-	if in == nil {
-		return BlacklistEntry{}
+func attachmentTypeFromProto(in pb.AttachmentType) AttachmentType {
+	switch in {
+	case pb.AttachmentType_ATTACHMENT_TYPE_CHANNEL_MANAGER:
+		return AttachmentTypeChannelManager
+	case pb.AttachmentType_ATTACHMENT_TYPE_CHANNEL_WRITER:
+		return AttachmentTypeChannelWriter
+	case pb.AttachmentType_ATTACHMENT_TYPE_CHANNEL_SUBSCRIPTION:
+		return AttachmentTypeChannelSubscription
+	case pb.AttachmentType_ATTACHMENT_TYPE_USER_BLACKLIST:
+		return AttachmentTypeUserBlacklist
+	default:
+		return ""
 	}
+}
+
+func attachmentFromProto(in *pb.Attachment) Attachment {
+	if in == nil {
+		return Attachment{}
+	}
+	return Attachment{
+		Owner:          userRefFromProto(in.Owner),
+		Subject:        userRefFromProto(in.Subject),
+		AttachmentType: attachmentTypeFromProto(in.AttachmentType),
+		ConfigJSON:     append([]byte(nil), in.ConfigJson...),
+		AttachedAt:     in.AttachedAt,
+		DeletedAt:      in.DeletedAt,
+		OriginNodeID:   in.OriginNodeId,
+	}
+}
+
+func subscriptionFromProto(in *pb.Attachment) Subscription {
+	attachment := attachmentFromProto(in)
+	return Subscription{
+		Subscriber:   attachment.Owner,
+		Channel:      attachment.Subject,
+		SubscribedAt: attachment.AttachedAt,
+		DeletedAt:    attachment.DeletedAt,
+		OriginNodeID: attachment.OriginNodeID,
+	}
+}
+
+func blacklistEntryFromProto(in *pb.Attachment) BlacklistEntry {
+	attachment := attachmentFromProto(in)
 	return BlacklistEntry{
-		Owner:        userRefFromProto(in.Owner),
-		Blocked:      userRefFromProto(in.Blocked),
-		BlockedAt:    in.BlockedAt,
-		DeletedAt:    in.DeletedAt,
-		OriginNodeID: in.OriginNodeId,
+		Owner:        attachment.Owner,
+		Blocked:      attachment.Subject,
+		BlockedAt:    attachment.AttachedAt,
+		DeletedAt:    attachment.DeletedAt,
+		OriginNodeID: attachment.OriginNodeID,
 	}
 }
 
@@ -506,7 +566,15 @@ func messagesFromProto(items []*pb.Message) []Message {
 	return out
 }
 
-func subscriptionsFromProto(items []*pb.Subscription) []Subscription {
+func attachmentsFromProto(items []*pb.Attachment) []Attachment {
+	out := make([]Attachment, 0, len(items))
+	for _, item := range items {
+		out = append(out, attachmentFromProto(item))
+	}
+	return out
+}
+
+func subscriptionsFromProto(items []*pb.Attachment) []Subscription {
 	out := make([]Subscription, 0, len(items))
 	for _, item := range items {
 		out = append(out, subscriptionFromProto(item))
@@ -514,7 +582,7 @@ func subscriptionsFromProto(items []*pb.Subscription) []Subscription {
 	return out
 }
 
-func blacklistEntriesFromProto(items []*pb.BlacklistEntry) []BlacklistEntry {
+func blacklistEntriesFromProto(items []*pb.Attachment) []BlacklistEntry {
 	out := make([]BlacklistEntry, 0, len(items))
 	for _, item := range items {
 		out = append(out, blacklistEntryFromProto(item))
