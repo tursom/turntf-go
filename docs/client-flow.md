@@ -146,11 +146,15 @@ ServerEnvelope {
       role: "user"
     }
     protocol_version: "client-v1alpha1"
+    session_ref: {
+      serving_node_id: 4096
+      session_id: "session-a"
+    }
   }
 }
 ```
 
-登录成功后，服务端立即开始补发历史消息。客户端要准备好在 `LoginResponse` 后连续处理多个 `MessagePushed`。
+登录成功后，服务端立即开始补发历史消息。客户端要准备好在 `LoginResponse` 后连续处理多个 `MessagePushed`。如果业务需要做点对点瞬时投递，应该先保存 `session_ref`，它标识当前在线连接。
 
 如果其他节点或本节点把瞬时包转发给当前用户，客户端还可能收到 `PacketPushed`。这类数据包不会进入历史补发。
 
@@ -242,11 +246,15 @@ ClientEnvelope {
     body: "\xff\x00payload"
     delivery_kind: CLIENT_DELIVERY_KIND_TRANSIENT
     delivery_mode: CLIENT_DELIVERY_MODE_BEST_EFFORT
+    target_session: {
+      serving_node_id: 8192
+      session_id: "session-b"
+    }
   }
 }
 ```
 
-成功后服务端返回 `send_message_response.transient_accepted`。这只表示瞬时包已进入本地路由层，不代表目标用户已经收到。
+如果填了 `target_session`，服务端只会把瞬时包路由到该在线 session；`PacketPushed` 和 `send_message_response.transient_accepted` 里也会回显这个字段。成功后服务端返回 `send_message_response.transient_accepted`。这只表示瞬时包已进入本地路由层，不代表目标用户已经收到。
 
 发送权限：
 
@@ -345,6 +353,7 @@ broadcast：
 1. 客户端直接把消息发给最终目标用户。
 2. 服务端按动态路由把瞬时包转发到目标节点。
 3. 只有目标用户当前在线时才能收到 `PacketPushed`。
+4. 如果需要把瞬时包只投递给某一个连接，先调用 `resolve_user_sessions`，再选定 `SessionRef` 填进 `target_session`。
 4. 瞬时包不落库，也不会在后续登录时补发。
 
 ## 错误处理

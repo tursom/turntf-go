@@ -65,11 +65,21 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 			"created_at": "hlc-created",
 		})
 	})
-	mux.HandleFunc("/nodes/4096/users/1025/subscriptions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/nodes/4096/users/1025/attachments/channel_subscription/4096/1026", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("unexpected subscription method: %s", r.Method)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
 		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(Attachment{
+			Owner:          UserRef{NodeID: 4096, UserID: 1025},
+			Subject:        UserRef{NodeID: 4096, UserID: 1026},
+			AttachmentType: AttachmentTypeChannelSubscription,
+			AttachedAt:     "hlc-subscribed",
+			OriginNodeID:   4096,
+		})
 	})
 	mux.HandleFunc("/nodes/4096/users/1025/messages", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
@@ -165,53 +175,60 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"target_node_id": 8192, "items": []LoggedInUser{}, "count": 0})
 	})
-	mux.HandleFunc("/nodes/4096/users/1025/blacklist", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/nodes/4096/users/1025/attachments/user_blacklist/4096/1027", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
 		switch r.Method {
-		case http.MethodPost:
+		case http.MethodPut:
 			var raw map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 				t.Fatalf("decode block user: %v", err)
 			}
-			if raw["blocked_node_id"] != float64(4096) || raw["blocked_user_id"] != float64(1027) {
+			configJSON, ok := raw["config_json"].(map[string]any)
+			if !ok || len(configJSON) != 0 {
 				t.Fatalf("unexpected block request: %#v", raw)
 			}
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(BlacklistEntry{
-				Owner:        UserRef{NodeID: 4096, UserID: 1025},
-				Blocked:      UserRef{NodeID: 4096, UserID: 1027},
-				BlockedAt:    "hlc-blocked",
-				OriginNodeID: 4096,
+			json.NewEncoder(w).Encode(Attachment{
+				Owner:          UserRef{NodeID: 4096, UserID: 1025},
+				Subject:        UserRef{NodeID: 4096, UserID: 1027},
+				AttachmentType: AttachmentTypeUserBlacklist,
+				AttachedAt:     "hlc-blocked",
+				OriginNodeID:   4096,
 			})
-		case http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]any{
-				"items": []BlacklistEntry{{
-					Owner:        UserRef{NodeID: 4096, UserID: 1025},
-					Blocked:      UserRef{NodeID: 4096, UserID: 1027},
-					BlockedAt:    "hlc-blocked",
-					OriginNodeID: 4096,
-				}},
-				"count": 1,
+		case http.MethodDelete:
+			json.NewEncoder(w).Encode(Attachment{
+				Owner:          UserRef{NodeID: 4096, UserID: 1025},
+				Subject:        UserRef{NodeID: 4096, UserID: 1027},
+				AttachmentType: AttachmentTypeUserBlacklist,
+				AttachedAt:     "hlc-blocked",
+				DeletedAt:      "hlc-unblocked",
+				OriginNodeID:   4096,
 			})
 		default:
 			t.Fatalf("unexpected blacklist method: %s", r.Method)
 		}
 	})
-	mux.HandleFunc("/nodes/4096/users/1025/blacklist/4096/1027", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			t.Fatalf("unexpected unblock method: %s", r.Method)
+	mux.HandleFunc("/nodes/4096/users/1025/attachments", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected attachments method: %s", r.Method)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
-		json.NewEncoder(w).Encode(BlacklistEntry{
-			Owner:        UserRef{NodeID: 4096, UserID: 1025},
-			Blocked:      UserRef{NodeID: 4096, UserID: 1027},
-			BlockedAt:    "hlc-blocked",
-			DeletedAt:    "hlc-unblocked",
-			OriginNodeID: 4096,
+		if got := r.URL.Query().Get("attachment_type"); got != "user_blacklist" {
+			t.Fatalf("unexpected attachment_type: %q", got)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"items": []Attachment{{
+				Owner:          UserRef{NodeID: 4096, UserID: 1025},
+				Subject:        UserRef{NodeID: 4096, UserID: 1027},
+				AttachmentType: AttachmentTypeUserBlacklist,
+				AttachedAt:     "hlc-blocked",
+				OriginNodeID:   4096,
+			}},
+			"count": 1,
 		})
 	})
 

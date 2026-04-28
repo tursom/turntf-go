@@ -16,14 +16,16 @@ go get github.com/tursom/turntf-go
 ## 功能
 
 - WebSocket 首帧登录
+- 登录返回 `session_ref`
 - 自动重连与重登录
 - `seen_messages` 重放去重
 - `MessagePushed` 自动执行 `保存消息 -> 保存游标 -> ack`
 - `SendMessage`
-- `SendPacket`
+- `SendPacket` / `SendPacketToSession`
+- `ResolveUserSessions`
 - `Ping`
 - HTTP 登录
-- WS 创建用户、订阅管理、黑名单管理、查询消息、集群查询、发消息、发瞬时包
+- WS 创建用户、订阅管理、黑名单管理、查询消息、集群查询、解析在线 session、发消息、发瞬时包
 
 ## 包内容
 
@@ -54,7 +56,7 @@ type store struct {
 type handler struct{}
 
 func (handler) OnLogin(_ context.Context, info turntf.LoginInfo) {
-	log.Printf("login ok: user=%d protocol=%s", info.User.UserID, info.ProtocolVersion)
+	log.Printf("login ok: user=%d protocol=%s session=%d/%s", info.User.UserID, info.ProtocolVersion, info.SessionRef.ServingNodeID, info.SessionRef.SessionID)
 }
 
 func (handler) OnMessage(_ context.Context, msg turntf.Message) {
@@ -100,9 +102,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := client.Connect(ctx); err != nil {
-		log.Fatal(err)
-	}
+if err := client.Connect(ctx); err != nil {
+	log.Fatal(err)
+}
+
+if login, ok := client.CurrentLogin(); ok {
+	log.Printf("connected session: %d/%s", login.SessionRef.ServingNodeID, login.SessionRef.SessionID)
+}
 
 	_, err = client.CreateUser(ctx, token, turntf.CreateUserRequest{
 		Username: "alice",
@@ -242,7 +248,7 @@ go run ./cmd/turntf-demo -f docs/examples/demo-cross-node.yaml
 - `script` 支持顺序步骤，以及 `parallel` + `barrier` 的并行收发验证
 - `request` 和 `expect_event` 都显式绑定 `session`
 - `body` / `profile_json` 这类 bytes 字段默认按文本写，需要 JSON 或二进制时显式声明 `format`
-- `request.action` 支持 `send_message`、`send_packet`、`ping`、用户管理、订阅管理、黑名单管理、事件/运维/集群查询
+- `request.action` 支持 `send_message`、`send_packet`、`ping`、用户管理、订阅管理、黑名单管理、事件/运维/集群查询、`resolve_user_sessions`
 
 ### `Handler`
 
@@ -277,6 +283,7 @@ blockedUsers, err := client.ListBlockedUsers(ctx, token, owner)
 entry, err = client.UnblockUser(ctx, token, owner, blocked)
 nodes, err := client.ListClusterNodes(ctx)
 users, err := client.ListNodeLoggedInUsers(ctx, 4096)
+resolved, err := client.ResolveUserSessions(ctx, target)
 message, err := client.PostMessage(ctx, token, target, payload)
 err = client.PostPacket(ctx, token, target.NodeID, target, payload, turntf.DeliveryModeRouteRetry)
 ```
@@ -305,6 +312,8 @@ accepted, err := client.SendPacket(ctx, turntf.SendPacketInput{
 	Target:       turntf.UserRef{NodeID: 8192, UserID: 1025},
 	Body:         []byte{0xff, 0x00},
 	DeliveryMode: turntf.DeliveryModeRouteRetry,
+	// 可选：只投递到指定在线 session
+	TargetSession: turntf.SessionRef{ServingNodeID: 8192, SessionID: "session-id"},
 })
 ```
 
@@ -312,6 +321,31 @@ accepted, err := client.SendPacket(ctx, turntf.SendPacketInput{
 
 - `turntf.DeliveryModeBestEffort`
 - `turntf.DeliveryModeRouteRetry`
+
+如果你已经解析出目标用户的在线 session，也可以直接用便捷方法：
+
+```go
+accepted, err := client.SendPacketToSession(
+	ctx,
+	turntf.UserRef{NodeID: 8192, UserID: 1025},
+	turntf.SessionRef{ServingNodeID: 8192, SessionID: "session-id"},
+	[]byte("hello"),
+	turntf.DeliveryModeRouteRetry,
+)
+```
+
+### 解析在线 session
+
+```go
+resolved, err := client.ResolveUserSessions(ctx, turntf.UserRef{NodeID: 8192, UserID: 1025})
+if err != nil {
+	log.Fatal(err)
+}
+
+for _, item := range resolved.Sessions {
+	log.Printf("session=%d/%s transport=%s transient=%v", item.Session.ServingNodeID, item.Session.SessionID, item.Transport, item.TransientCapable)
+}
+```
 
 ### Ping
 

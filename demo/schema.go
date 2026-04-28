@@ -36,6 +36,7 @@ var (
 		"metrics",
 		"list_cluster_nodes",
 		"list_node_logged_in_users",
+		"resolve_user_sessions",
 	}
 	validEvents = []string{
 		"message_pushed",

@@ -335,36 +335,38 @@ func TestRunScenarioBlacklistAndDiscoveryFields(t *testing.T) {
 		})
 
 		blockReq := mustReadClientEnvelope(t, conn)
-		if blockReq.GetBlockUser().GetOwner().GetUserId() != 1025 || blockReq.GetBlockUser().GetBlocked().GetUserId() != 2025 {
-			t.Fatalf("unexpected block request: %+v", blockReq.GetBlockUser())
+		if blockReq.GetUpsertUserAttachment().GetOwner().GetUserId() != 1025 || blockReq.GetUpsertUserAttachment().GetSubject().GetUserId() != 2025 {
+			t.Fatalf("unexpected block request: %+v", blockReq.GetUpsertUserAttachment())
 		}
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
-			Body: &pb.ServerEnvelope_BlockUserResponse{
-				BlockUserResponse: &pb.BlockUserResponse{
-					RequestId: blockReq.GetBlockUser().GetRequestId(),
-					Entry: &pb.BlacklistEntry{
-						Owner:        &pb.UserRef{NodeId: 4096, UserId: 1025},
-						Blocked:      &pb.UserRef{NodeId: 8192, UserId: 2025},
-						BlockedAt:    "hlc-blocked",
-						OriginNodeId: 4096,
+			Body: &pb.ServerEnvelope_UpsertUserAttachmentResponse{
+				UpsertUserAttachmentResponse: &pb.UpsertUserAttachmentResponse{
+					RequestId: blockReq.GetUpsertUserAttachment().GetRequestId(),
+					Attachment: &pb.Attachment{
+						Owner:          &pb.UserRef{NodeId: 4096, UserId: 1025},
+						Subject:        &pb.UserRef{NodeId: 8192, UserId: 2025},
+						AttachmentType: pb.AttachmentType_ATTACHMENT_TYPE_USER_BLACKLIST,
+						AttachedAt:     "hlc-blocked",
+						OriginNodeId:   4096,
 					},
 				},
 			},
 		})
 
 		listReq := mustReadClientEnvelope(t, conn)
-		if listReq.GetListBlockedUsers().GetOwner().GetUserId() != 1025 {
-			t.Fatalf("unexpected list blocked request: %+v", listReq.GetListBlockedUsers())
+		if listReq.GetListUserAttachments().GetOwner().GetUserId() != 1025 {
+			t.Fatalf("unexpected list blocked request: %+v", listReq.GetListUserAttachments())
 		}
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
-			Body: &pb.ServerEnvelope_ListBlockedUsersResponse{
-				ListBlockedUsersResponse: &pb.ListBlockedUsersResponse{
-					RequestId: listReq.GetListBlockedUsers().GetRequestId(),
-					Items: []*pb.BlacklistEntry{{
-						Owner:        &pb.UserRef{NodeId: 4096, UserId: 1025},
-						Blocked:      &pb.UserRef{NodeId: 8192, UserId: 2025},
-						BlockedAt:    "hlc-blocked",
-						OriginNodeId: 4096,
+			Body: &pb.ServerEnvelope_ListUserAttachmentsResponse{
+				ListUserAttachmentsResponse: &pb.ListUserAttachmentsResponse{
+					RequestId: listReq.GetListUserAttachments().GetRequestId(),
+					Items: []*pb.Attachment{{
+						Owner:          &pb.UserRef{NodeId: 4096, UserId: 1025},
+						Subject:        &pb.UserRef{NodeId: 8192, UserId: 2025},
+						AttachmentType: pb.AttachmentType_ATTACHMENT_TYPE_USER_BLACKLIST,
+						AttachedAt:     "hlc-blocked",
+						OriginNodeId:   4096,
 					}},
 					Count: 1,
 				},
@@ -372,19 +374,20 @@ func TestRunScenarioBlacklistAndDiscoveryFields(t *testing.T) {
 		})
 
 		unblockReq := mustReadClientEnvelope(t, conn)
-		if unblockReq.GetUnblockUser().GetBlocked().GetUserId() != 2025 {
-			t.Fatalf("unexpected unblock request: %+v", unblockReq.GetUnblockUser())
+		if unblockReq.GetDeleteUserAttachment().GetSubject().GetUserId() != 2025 {
+			t.Fatalf("unexpected unblock request: %+v", unblockReq.GetDeleteUserAttachment())
 		}
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
-			Body: &pb.ServerEnvelope_UnblockUserResponse{
-				UnblockUserResponse: &pb.UnblockUserResponse{
-					RequestId: unblockReq.GetUnblockUser().GetRequestId(),
-					Entry: &pb.BlacklistEntry{
-						Owner:        &pb.UserRef{NodeId: 4096, UserId: 1025},
-						Blocked:      &pb.UserRef{NodeId: 8192, UserId: 2025},
-						BlockedAt:    "hlc-blocked",
-						DeletedAt:    "hlc-unblocked",
-						OriginNodeId: 4096,
+			Body: &pb.ServerEnvelope_DeleteUserAttachmentResponse{
+				DeleteUserAttachmentResponse: &pb.DeleteUserAttachmentResponse{
+					RequestId: unblockReq.GetDeleteUserAttachment().GetRequestId(),
+					Attachment: &pb.Attachment{
+						Owner:          &pb.UserRef{NodeId: 4096, UserId: 1025},
+						Subject:        &pb.UserRef{NodeId: 8192, UserId: 2025},
+						AttachmentType: pb.AttachmentType_ATTACHMENT_TYPE_USER_BLACKLIST,
+						AttachedAt:     "hlc-blocked",
+						DeletedAt:      "hlc-unblocked",
+						OriginNodeId:   4096,
 					},
 				},
 			},

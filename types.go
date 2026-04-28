@@ -17,6 +17,11 @@ type UserRef struct {
 	UserID int64 `json:"user_id"`
 }
 
+type SessionRef struct {
+	ServingNodeID int64  `json:"serving_node_id"`
+	SessionID     string `json:"session_id"`
+}
+
 type User struct {
 	NodeID         int64  `json:"node_id"`
 	UserID         int64  `json:"user_id"`
@@ -52,21 +57,23 @@ type Message struct {
 }
 
 type Packet struct {
-	PacketID     uint64       `json:"packet_id"`
-	SourceNodeID int64        `json:"source_node_id"`
-	TargetNodeID int64        `json:"target_node_id"`
-	Recipient    UserRef      `json:"recipient"`
-	Sender       UserRef      `json:"sender"`
-	Body         []byte       `json:"body"`
-	DeliveryMode DeliveryMode `json:"delivery_mode"`
+	PacketID      uint64       `json:"packet_id"`
+	SourceNodeID  int64        `json:"source_node_id"`
+	TargetNodeID  int64        `json:"target_node_id"`
+	Recipient     UserRef      `json:"recipient"`
+	Sender        UserRef      `json:"sender"`
+	Body          []byte       `json:"body"`
+	DeliveryMode  DeliveryMode `json:"delivery_mode"`
+	TargetSession SessionRef   `json:"target_session"`
 }
 
 type RelayAccepted struct {
-	PacketID     uint64       `json:"packet_id"`
-	SourceNodeID int64        `json:"source_node_id"`
-	TargetNodeID int64        `json:"target_node_id"`
-	Recipient    UserRef      `json:"recipient"`
-	DeliveryMode DeliveryMode `json:"delivery_mode"`
+	PacketID      uint64       `json:"packet_id"`
+	SourceNodeID  int64        `json:"source_node_id"`
+	TargetNodeID  int64        `json:"target_node_id"`
+	Recipient     UserRef      `json:"recipient"`
+	DeliveryMode  DeliveryMode `json:"delivery_mode"`
+	TargetSession SessionRef   `json:"target_session"`
 }
 
 type AttachmentType string
@@ -127,6 +134,24 @@ type LoggedInUser struct {
 	NodeID   int64  `json:"node_id"`
 	UserID   int64  `json:"user_id"`
 	Username string `json:"username"`
+}
+
+type OnlineNodePresence struct {
+	ServingNodeID int64  `json:"serving_node_id"`
+	SessionCount  int32  `json:"session_count"`
+	TransportHint string `json:"transport_hint,omitempty"`
+}
+
+type ResolvedSession struct {
+	Session          SessionRef `json:"session"`
+	Transport        string     `json:"transport,omitempty"`
+	TransientCapable bool       `json:"transient_capable"`
+}
+
+type ResolvedUserSessions struct {
+	User     UserRef              `json:"user"`
+	Presence []OnlineNodePresence `json:"presence,omitempty"`
+	Sessions []ResolvedSession    `json:"sessions,omitempty"`
 }
 
 type MessageTrimStatus struct {
@@ -193,6 +218,7 @@ type DeleteUserResult struct {
 type LoginInfo struct {
 	User            User
 	ProtocolVersion string
+	SessionRef      SessionRef
 }
 
 type SendMessageInput struct {
@@ -201,9 +227,10 @@ type SendMessageInput struct {
 }
 
 type SendPacketInput struct {
-	Target       UserRef
-	Body         []byte
-	DeliveryMode DeliveryMode
+	Target        UserRef
+	Body          []byte
+	DeliveryMode  DeliveryMode
+	TargetSession SessionRef
 }
 
 type CreateUserRequest struct {
@@ -230,6 +257,24 @@ func (r UserRef) validate() error {
 	}
 	if r.UserID == 0 {
 		return fmt.Errorf("user_id is required")
+	}
+	return nil
+}
+
+func (r SessionRef) IsZero() bool {
+	return r.ServingNodeID == 0 && r.SessionID == ""
+}
+
+func (r SessionRef) Valid() bool {
+	return r.ServingNodeID != 0 && r.SessionID != ""
+}
+
+func (r SessionRef) validate() error {
+	if r.ServingNodeID == 0 {
+		return fmt.Errorf("serving_node_id is required")
+	}
+	if r.SessionID == "" {
+		return fmt.Errorf("session_id is required")
 	}
 	return nil
 }
@@ -279,6 +324,26 @@ func userRefFromProto(in *pb.UserRef) UserRef {
 	return UserRef{
 		NodeID: in.NodeId,
 		UserID: in.UserId,
+	}
+}
+
+func sessionRefToProto(in SessionRef) *pb.SessionRef {
+	if in.IsZero() {
+		return nil
+	}
+	return &pb.SessionRef{
+		ServingNodeId: in.ServingNodeID,
+		SessionId:     in.SessionID,
+	}
+}
+
+func sessionRefFromProto(in *pb.SessionRef) SessionRef {
+	if in == nil {
+		return SessionRef{}
+	}
+	return SessionRef{
+		ServingNodeID: in.ServingNodeId,
+		SessionID:     in.SessionId,
 	}
 }
 
@@ -335,13 +400,14 @@ func packetFromProto(in *pb.Packet) Packet {
 		return Packet{}
 	}
 	return Packet{
-		PacketID:     in.PacketId,
-		SourceNodeID: in.SourceNodeId,
-		TargetNodeID: in.TargetNodeId,
-		Recipient:    userRefFromProto(in.Recipient),
-		Sender:       userRefFromProto(in.Sender),
-		Body:         append([]byte(nil), in.Body...),
-		DeliveryMode: deliveryModeFromProto(in.DeliveryMode),
+		PacketID:      in.PacketId,
+		SourceNodeID:  in.SourceNodeId,
+		TargetNodeID:  in.TargetNodeId,
+		Recipient:     userRefFromProto(in.Recipient),
+		Sender:        userRefFromProto(in.Sender),
+		Body:          append([]byte(nil), in.Body...),
+		DeliveryMode:  deliveryModeFromProto(in.DeliveryMode),
+		TargetSession: sessionRefFromProto(in.TargetSession),
 	}
 }
 
@@ -350,11 +416,12 @@ func relayAcceptedFromProto(in *pb.TransientAccepted) RelayAccepted {
 		return RelayAccepted{}
 	}
 	return RelayAccepted{
-		PacketID:     in.PacketId,
-		SourceNodeID: in.SourceNodeId,
-		TargetNodeID: in.TargetNodeId,
-		Recipient:    userRefFromProto(in.Recipient),
-		DeliveryMode: deliveryModeFromProto(in.DeliveryMode),
+		PacketID:      in.PacketId,
+		SourceNodeID:  in.SourceNodeId,
+		TargetNodeID:  in.TargetNodeId,
+		Recipient:     userRefFromProto(in.Recipient),
+		DeliveryMode:  deliveryModeFromProto(in.DeliveryMode),
+		TargetSession: sessionRefFromProto(in.TargetSession),
 	}
 }
 
@@ -462,6 +529,50 @@ func loggedInUserFromProto(in *pb.LoggedInUser) LoggedInUser {
 		NodeID:   in.NodeId,
 		UserID:   in.UserId,
 		Username: in.Username,
+	}
+}
+
+func onlineNodePresenceFromProto(in *pb.OnlineNodePresence) OnlineNodePresence {
+	if in == nil {
+		return OnlineNodePresence{}
+	}
+	return OnlineNodePresence{
+		ServingNodeID: in.ServingNodeId,
+		SessionCount:  in.SessionCount,
+		TransportHint: in.TransportHint,
+	}
+}
+
+func resolvedSessionFromProto(in *pb.ResolvedSession) ResolvedSession {
+	if in == nil {
+		return ResolvedSession{}
+	}
+	return ResolvedSession{
+		Session:          sessionRefFromProto(in.Session),
+		Transport:        in.Transport,
+		TransientCapable: in.TransientCapable,
+	}
+}
+
+func resolvedUserSessionsFromProto(in *pb.ResolveUserSessionsResponse) ResolvedUserSessions {
+	if in == nil {
+		return ResolvedUserSessions{}
+	}
+
+	presence := make([]OnlineNodePresence, 0, len(in.Presence))
+	for _, item := range in.Presence {
+		presence = append(presence, onlineNodePresenceFromProto(item))
+	}
+
+	sessions := make([]ResolvedSession, 0, len(in.Items))
+	for _, item := range in.Items {
+		sessions = append(sessions, resolvedSessionFromProto(item))
+	}
+
+	return ResolvedUserSessions{
+		User:     userRefFromProto(in.User),
+		Presence: presence,
+		Sessions: sessions,
 	}
 }
 

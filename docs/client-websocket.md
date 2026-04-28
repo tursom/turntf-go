@@ -51,9 +51,15 @@ ServerEnvelope {
       role: "user"
     }
     protocol_version: "client-v1alpha1"
+    session_ref: {
+      serving_node_id: 4096
+      session_id: "session-a"
+    }
   }
 }
 ```
+
+`session_ref` 是当前连接这次登录对应的在线 session 标识。业务侧如果要做点对点/定向瞬时投递，可以保存它，或通过后续 `resolve_user_sessions` RPC 查询其他在线 session。
 
 登录失败时，服务端返回 `ServerEnvelope.error`，然后关闭连接。
 
@@ -103,6 +109,10 @@ ServerEnvelope {
       sender: { node_id: 4096, user_id: 1 }
       body: "\xff\x00payload"
       delivery_mode: CLIENT_DELIVERY_MODE_BEST_EFFORT
+      target_session: {
+        serving_node_id: 8192
+        session_id: "session-b"
+      }
     }
   }
 }
@@ -157,6 +167,10 @@ ClientEnvelope {
     body: "\xff\x00payload"
     delivery_kind: CLIENT_DELIVERY_KIND_TRANSIENT
     delivery_mode: CLIENT_DELIVERY_MODE_ROUTE_RETRY
+    target_session: {
+      serving_node_id: 8192
+      session_id: "session-b"
+    }
   }
 }
 ```
@@ -169,6 +183,7 @@ ClientEnvelope {
 - `body`：原始字节数组，不能为空；不要求 UTF-8。
 - `delivery_kind`：可选 `CLIENT_DELIVERY_KIND_PERSISTENT` 或 `CLIENT_DELIVERY_KIND_TRANSIENT`，默认是持久化消息。
 - `delivery_mode`：仅在 `delivery_kind = CLIENT_DELIVERY_KIND_TRANSIENT` 时生效；可选 `CLIENT_DELIVERY_MODE_BEST_EFFORT` 或 `CLIENT_DELIVERY_MODE_ROUTE_RETRY`。
+- `target_session`：仅在 `delivery_kind = CLIENT_DELIVERY_KIND_TRANSIENT` 时可选使用；填入后只会投递给目标用户的指定在线 session。
 
 权限规则与 HTTP 写消息接口一致：
 
@@ -207,6 +222,10 @@ ServerEnvelope {
       target_node_id: 8192
       recipient: { node_id: 8192, user_id: 1025 }
       delivery_mode: CLIENT_DELIVERY_MODE_ROUTE_RETRY
+      target_session: {
+        serving_node_id: 8192
+        session_id: "session-b"
+      }
     }
   }
 }
@@ -224,7 +243,7 @@ ServerEnvelope {
 - 消息与订阅查询：`list_messages`、`list_subscriptions`
 - 订阅管理：`subscribe_channel`、`unsubscribe_channel`
 - 黑名单管理：`block_user`、`unblock_user`、`list_blocked_users`
-- 集群与运维查询：`list_cluster_nodes`、`list_node_logged_in_users`、`list_events`、`operations_status`、`metrics`
+- 集群与运维查询：`list_cluster_nodes`、`list_node_logged_in_users`、`resolve_user_sessions`、`list_events`、`operations_status`、`metrics`
 
 示例：管理员创建用户
 
@@ -357,6 +376,37 @@ ServerEnvelope {
 }
 ```
 
+示例：查询某个用户当前在线 session
+
+```protobuf
+ClientEnvelope {
+  resolve_user_sessions: ResolveUserSessionsRequest {
+    request_id: 1007
+    user: { node_id: 8192, user_id: 1025 }
+  }
+}
+```
+
+```protobuf
+ServerEnvelope {
+  resolve_user_sessions_response: ResolveUserSessionsResponse {
+    request_id: 1007
+    user: { node_id: 8192, user_id: 1025 }
+    presence: [
+      { serving_node_id: 8192, session_count: 2, transport_hint: "realtime" }
+    ]
+    items: [
+      {
+        session: { serving_node_id: 8192, session_id: "session-b" }
+        transport: "realtime"
+        transient_capable: true
+      }
+    ]
+    count: 1
+  }
+}
+```
+
 ```protobuf
 ServerEnvelope {
   list_cluster_nodes_response: ListClusterNodesResponse {
@@ -375,6 +425,7 @@ ServerEnvelope {
 - `create_user`、`update_user`、`delete_user`、`list_events`、`operations_status`、`metrics` 仅管理员可用。
 - `list_cluster_nodes` 只要求当前连接已登录，普通用户可用。
 - `list_node_logged_in_users` 只要求当前连接已登录，普通用户可用；目标节点不可达时返回错误，不返回空列表。
+- `resolve_user_sessions` 的权限规则与给该用户发消息一致；结果同时返回按节点聚合的 `presence` 和可直接用于定向瞬时投递的 `items`。
 - `get_user` 允许本人或管理员。
 - `list_messages` 对可登录用户允许本人或管理员；对 channel/broadcast 目标仅管理员可直接查询。
 - `subscribe_channel`、`unsubscribe_channel`、`list_subscriptions` 允许本人或管理员。

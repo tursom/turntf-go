@@ -118,6 +118,7 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 						Role:     "user",
 					},
 					ProtocolVersion: "client-v1alpha1",
+					SessionRef:      &pb.SessionRef{ServingNodeId: 4096, SessionId: "session-a"},
 				},
 			},
 		})
@@ -188,6 +189,13 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 	if err := client.Connect(ctx); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
+	loginInfo, ok := client.CurrentLogin()
+	if !ok {
+		t.Fatal("expected current login info")
+	}
+	if loginInfo.SessionRef != (SessionRef{ServingNodeID: 4096, SessionID: "session-a"}) {
+		t.Fatalf("unexpected current session ref: %+v", loginInfo.SessionRef)
+	}
 
 	select {
 	case cursor := <-acked:
@@ -226,6 +234,9 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 	}
 	if len(handler.logins) != 1 {
 		t.Fatalf("expected 1 login callback, got %d", len(handler.logins))
+	}
+	if handler.logins[0].SessionRef != (SessionRef{ServingNodeID: 4096, SessionID: "session-a"}) {
+		t.Fatalf("unexpected login callback session ref: %+v", handler.logins[0].SessionRef)
 	}
 	if len(handler.messages) != 1 {
 		t.Fatalf("expected 1 pushed message, got %d", len(handler.messages))
@@ -330,6 +341,162 @@ func TestClientRealtimeStreamDialsRealtimePath(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+}
+
+func TestClientResolveUserSessionsAndTargetedPacket(t *testing.T) {
+	store := &recordingStore{}
+	handler := &recordingHandler{}
+
+	targetUser := UserRef{NodeID: 4096, UserID: 1025}
+	targetSession := SessionRef{ServingNodeID: 8192, SessionID: "session-target"}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		_ = mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: targetUser.NodeID, UserId: targetUser.UserID, Username: "alice", Role: "user"},
+					ProtocolVersion: "client-v1alpha1",
+					SessionRef:      &pb.SessionRef{ServingNodeId: 4096, SessionId: "session-a"},
+				},
+			},
+		})
+
+		resolveReq := mustReadClientEnvelope(t, conn)
+		if got := resolveReq.GetResolveUserSessions().GetUser(); got == nil || got.GetNodeId() != targetUser.NodeID || got.GetUserId() != targetUser.UserID {
+			t.Fatalf("unexpected resolve_user_sessions target: %+v", got)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_ResolveUserSessionsResponse{
+				ResolveUserSessionsResponse: &pb.ResolveUserSessionsResponse{
+					RequestId: resolveReq.GetResolveUserSessions().GetRequestId(),
+					User:      userRefToProto(targetUser),
+					Presence: []*pb.OnlineNodePresence{
+						{ServingNodeId: 4096, SessionCount: 1, TransportHint: "websocket"},
+						{ServingNodeId: 8192, SessionCount: 1, TransportHint: "realtime"},
+					},
+					Items: []*pb.ResolvedSession{
+						{
+							Session:          &pb.SessionRef{ServingNodeId: 4096, SessionId: "session-a"},
+							Transport:        "websocket",
+							TransientCapable: true,
+						},
+						{
+							Session:          sessionRefToProto(targetSession),
+							Transport:        "realtime",
+							TransientCapable: true,
+						},
+					},
+					Count: 2,
+				},
+			},
+		})
+
+		sendReq := mustReadClientEnvelope(t, conn)
+		if sendReq.GetSendMessage().GetDeliveryKind() != pb.ClientDeliveryKind_CLIENT_DELIVERY_KIND_TRANSIENT {
+			t.Fatalf("unexpected delivery kind: %v", sendReq.GetSendMessage().GetDeliveryKind())
+		}
+		if got := sendReq.GetSendMessage().GetTargetSession(); got == nil || got.GetServingNodeId() != targetSession.ServingNodeID || got.GetSessionId() != targetSession.SessionID {
+			t.Fatalf("unexpected target_session in send request: %+v", got)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_SendMessageResponse{
+				SendMessageResponse: &pb.SendMessageResponse{
+					RequestId: sendReq.GetSendMessage().GetRequestId(),
+					Body: &pb.SendMessageResponse_TransientAccepted{
+						TransientAccepted: &pb.TransientAccepted{
+							PacketId:      77,
+							SourceNodeId:  4096,
+							TargetNodeId:  8192,
+							Recipient:     userRefToProto(targetUser),
+							DeliveryMode:  pb.ClientDeliveryMode_CLIENT_DELIVERY_MODE_ROUTE_RETRY,
+							TargetSession: sessionRefToProto(targetSession),
+						},
+					},
+				},
+			},
+		})
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_PacketPushed{
+				PacketPushed: &pb.PacketPushed{
+					Packet: &pb.Packet{
+						PacketId:      77,
+						SourceNodeId:  4096,
+						TargetNodeId:  8192,
+						Recipient:     userRefToProto(targetUser),
+						Sender:        userRefToProto(targetUser),
+						Body:          []byte("targeted"),
+						DeliveryMode:  pb.ClientDeliveryMode_CLIENT_DELIVERY_MODE_ROUTE_RETRY,
+						TargetSession: sessionRefToProto(targetSession),
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:        server.URL,
+		Credentials:    Credentials{NodeID: targetUser.NodeID, UserID: targetUser.UserID, Password: MustPlainPassword("alice-password")},
+		CursorStore:    store,
+		Handler:        handler,
+		RequestTimeout: 2 * time.Second,
+		PingInterval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	resolved, err := client.ResolveUserSessions(ctx, targetUser)
+	if err != nil {
+		t.Fatalf("ResolveUserSessions: %v", err)
+	}
+	if resolved.User != targetUser {
+		t.Fatalf("unexpected resolved user: %+v", resolved.User)
+	}
+	if len(resolved.Presence) != 2 || resolved.Presence[1].ServingNodeID != 8192 || resolved.Presence[1].TransportHint != "realtime" {
+		t.Fatalf("unexpected presence: %+v", resolved.Presence)
+	}
+	if len(resolved.Sessions) != 2 || resolved.Sessions[1].Session != targetSession || !resolved.Sessions[1].TransientCapable {
+		t.Fatalf("unexpected resolved sessions: %+v", resolved.Sessions)
+	}
+
+	accepted, err := client.SendPacketToSession(ctx, targetUser, targetSession, []byte("targeted"), DeliveryModeRouteRetry)
+	if err != nil {
+		t.Fatalf("SendPacketToSession: %v", err)
+	}
+	if accepted.TargetSession != targetSession || accepted.TargetNodeID != 8192 {
+		t.Fatalf("unexpected transient acceptance: %+v", accepted)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		handler.mu.Lock()
+		gotPackets := append([]Packet(nil), handler.packets...)
+		handler.mu.Unlock()
+		if len(gotPackets) == 1 {
+			if gotPackets[0].TargetSession != targetSession || string(gotPackets[0].Body) != "targeted" {
+				t.Fatalf("unexpected packet push: %+v", gotPackets[0])
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("expected targeted packet push, got %+v", handler.packets)
 }
 
 func TestClientUnauthorizedStopsReconnect(t *testing.T) {
@@ -512,36 +679,38 @@ func TestClientBlacklistAndOperationsStatusRPCs(t *testing.T) {
 		})
 
 		blockReq := mustReadClientEnvelope(t, conn)
-		if blockReq.GetBlockUser().GetOwner().GetUserId() != owner.UserID || blockReq.GetBlockUser().GetBlocked().GetUserId() != blocked.UserID {
-			t.Fatalf("unexpected block request: %+v", blockReq.GetBlockUser())
+		if blockReq.GetUpsertUserAttachment().GetOwner().GetUserId() != owner.UserID || blockReq.GetUpsertUserAttachment().GetSubject().GetUserId() != blocked.UserID {
+			t.Fatalf("unexpected block request: %+v", blockReq.GetUpsertUserAttachment())
 		}
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
-			Body: &pb.ServerEnvelope_BlockUserResponse{
-				BlockUserResponse: &pb.BlockUserResponse{
-					RequestId: blockReq.GetBlockUser().GetRequestId(),
-					Entry: &pb.BlacklistEntry{
-						Owner:        userRefToProto(owner),
-						Blocked:      userRefToProto(blocked),
-						BlockedAt:    "hlc-blocked",
-						OriginNodeId: 4096,
+			Body: &pb.ServerEnvelope_UpsertUserAttachmentResponse{
+				UpsertUserAttachmentResponse: &pb.UpsertUserAttachmentResponse{
+					RequestId: blockReq.GetUpsertUserAttachment().GetRequestId(),
+					Attachment: &pb.Attachment{
+						Owner:          userRefToProto(owner),
+						Subject:        userRefToProto(blocked),
+						AttachmentType: pb.AttachmentType_ATTACHMENT_TYPE_USER_BLACKLIST,
+						AttachedAt:     "hlc-blocked",
+						OriginNodeId:   4096,
 					},
 				},
 			},
 		})
 
 		listReq := mustReadClientEnvelope(t, conn)
-		if listReq.GetListBlockedUsers().GetOwner().GetUserId() != owner.UserID {
-			t.Fatalf("unexpected list blocked request: %+v", listReq.GetListBlockedUsers())
+		if listReq.GetListUserAttachments().GetOwner().GetUserId() != owner.UserID {
+			t.Fatalf("unexpected list blocked request: %+v", listReq.GetListUserAttachments())
 		}
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
-			Body: &pb.ServerEnvelope_ListBlockedUsersResponse{
-				ListBlockedUsersResponse: &pb.ListBlockedUsersResponse{
-					RequestId: listReq.GetListBlockedUsers().GetRequestId(),
-					Items: []*pb.BlacklistEntry{{
-						Owner:        userRefToProto(owner),
-						Blocked:      userRefToProto(blocked),
-						BlockedAt:    "hlc-blocked",
-						OriginNodeId: 4096,
+			Body: &pb.ServerEnvelope_ListUserAttachmentsResponse{
+				ListUserAttachmentsResponse: &pb.ListUserAttachmentsResponse{
+					RequestId: listReq.GetListUserAttachments().GetRequestId(),
+					Items: []*pb.Attachment{{
+						Owner:          userRefToProto(owner),
+						Subject:        userRefToProto(blocked),
+						AttachmentType: pb.AttachmentType_ATTACHMENT_TYPE_USER_BLACKLIST,
+						AttachedAt:     "hlc-blocked",
+						OriginNodeId:   4096,
 					}},
 					Count: 1,
 				},
@@ -549,19 +718,20 @@ func TestClientBlacklistAndOperationsStatusRPCs(t *testing.T) {
 		})
 
 		unblockReq := mustReadClientEnvelope(t, conn)
-		if unblockReq.GetUnblockUser().GetBlocked().GetUserId() != blocked.UserID {
-			t.Fatalf("unexpected unblock request: %+v", unblockReq.GetUnblockUser())
+		if unblockReq.GetDeleteUserAttachment().GetSubject().GetUserId() != blocked.UserID {
+			t.Fatalf("unexpected unblock request: %+v", unblockReq.GetDeleteUserAttachment())
 		}
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
-			Body: &pb.ServerEnvelope_UnblockUserResponse{
-				UnblockUserResponse: &pb.UnblockUserResponse{
-					RequestId: unblockReq.GetUnblockUser().GetRequestId(),
-					Entry: &pb.BlacklistEntry{
-						Owner:        userRefToProto(owner),
-						Blocked:      userRefToProto(blocked),
-						BlockedAt:    "hlc-blocked",
-						DeletedAt:    "hlc-unblocked",
-						OriginNodeId: 4096,
+			Body: &pb.ServerEnvelope_DeleteUserAttachmentResponse{
+				DeleteUserAttachmentResponse: &pb.DeleteUserAttachmentResponse{
+					RequestId: unblockReq.GetDeleteUserAttachment().GetRequestId(),
+					Attachment: &pb.Attachment{
+						Owner:          userRefToProto(owner),
+						Subject:        userRefToProto(blocked),
+						AttachmentType: pb.AttachmentType_ATTACHMENT_TYPE_USER_BLACKLIST,
+						AttachedAt:     "hlc-blocked",
+						DeletedAt:      "hlc-unblocked",
+						OriginNodeId:   4096,
 					},
 				},
 			},
@@ -654,6 +824,27 @@ func TestClientListNodeLoggedInUsersRequiresNodeID(t *testing.T) {
 
 	if _, err := client.ListNodeLoggedInUsers(context.Background(), 0); err == nil {
 		t.Fatal("expected validation error for empty node_id")
+	}
+}
+
+func TestClientSendPacketRejectsInvalidTargetSession(t *testing.T) {
+	client, err := NewClient(Config{
+		BaseURL:      "http://127.0.0.1:8080",
+		Credentials:  Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
+		PingInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.SendPacket(context.Background(), SendPacketInput{
+		Target:        UserRef{NodeID: 4096, UserID: 1025},
+		Body:          []byte("payload"),
+		DeliveryMode:  DeliveryModeBestEffort,
+		TargetSession: SessionRef{ServingNodeID: 4096},
+	})
+	if err == nil {
+		t.Fatal("expected validation error for invalid target_session")
 	}
 }
 

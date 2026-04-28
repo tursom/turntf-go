@@ -76,6 +76,7 @@ type Client struct {
 	authenticated bool
 	closed        bool
 	stopReconnect bool
+	loginInfo     LoginInfo
 
 	pendingMu sync.Mutex
 	pending   map[uint64]chan requestResult
@@ -137,6 +138,15 @@ func NewClient(cfg Config) (*Client, error) {
 
 func (c *Client) HTTP() *HTTPClient {
 	return c.http
+}
+
+func (c *Client) CurrentLogin() (LoginInfo, bool) {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	if !c.authenticated {
+		return LoginInfo{}, false
+	}
+	return c.loginInfo, true
 }
 
 func (c *Client) Login(ctx context.Context, nodeID, userID int64, password string) (string, error) {
@@ -251,6 +261,8 @@ func (c *Client) Close() error {
 	c.closed = true
 	conn := c.conn
 	c.conn = nil
+	c.authenticated = false
+	c.loginInfo = LoginInfo{}
 	c.stateMu.Unlock()
 
 	c.cancel()
@@ -321,16 +333,22 @@ func (c *Client) SendPacket(ctx context.Context, input SendPacketInput) (RelayAc
 	if err := input.DeliveryMode.validatePacketMode(); err != nil {
 		return zero, err
 	}
+	if !input.TargetSession.IsZero() {
+		if err := input.TargetSession.validate(); err != nil {
+			return zero, fmt.Errorf("invalid target_session: %w", err)
+		}
+	}
 
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
 		return &pb.ClientEnvelope{
 			Body: &pb.ClientEnvelope_SendMessage{
 				SendMessage: &pb.SendMessageRequest{
-					RequestId:    requestID,
-					Target:       userRefToProto(input.Target),
-					Body:         append([]byte(nil), input.Body...),
-					DeliveryKind: pb.ClientDeliveryKind_CLIENT_DELIVERY_KIND_TRANSIENT,
-					DeliveryMode: deliveryModeToProto(input.DeliveryMode),
+					RequestId:     requestID,
+					Target:        userRefToProto(input.Target),
+					Body:          append([]byte(nil), input.Body...),
+					DeliveryKind:  pb.ClientDeliveryKind_CLIENT_DELIVERY_KIND_TRANSIENT,
+					DeliveryMode:  deliveryModeToProto(input.DeliveryMode),
+					TargetSession: sessionRefToProto(input.TargetSession),
 				},
 			},
 		}
@@ -346,6 +364,15 @@ func (c *Client) SendPacket(ctx context.Context, input SendPacketInput) (RelayAc
 		return zero, &ProtocolError{Message: "missing transient_accepted in send response"}
 	}
 	return relay, nil
+}
+
+func (c *Client) SendPacketToSession(ctx context.Context, target UserRef, targetSession SessionRef, body []byte, mode DeliveryMode) (RelayAccepted, error) {
+	return c.SendPacket(ctx, SendPacketInput{
+		Target:        target,
+		Body:          body,
+		DeliveryMode:  mode,
+		TargetSession: targetSession,
+	})
 }
 
 func (c *Client) GetUser(ctx context.Context, target UserRef) (User, error) {
@@ -710,6 +737,33 @@ func (c *Client) ListNodeLoggedInUsers(ctx context.Context, nodeID int64) ([]Log
 	return items, nil
 }
 
+func (c *Client) ResolveUserSessions(ctx context.Context, user UserRef) (ResolvedUserSessions, error) {
+	var zero ResolvedUserSessions
+	if err := user.validate(); err != nil {
+		return zero, fmt.Errorf("invalid user: %w", err)
+	}
+
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_ResolveUserSessions{
+				ResolveUserSessions: &pb.ResolveUserSessionsRequest{
+					RequestId: requestID,
+					User:      userRefToProto(user),
+				},
+			},
+		}
+	})
+	if err != nil {
+		return zero, err
+	}
+
+	sessions, ok := res.value.(ResolvedUserSessions)
+	if !ok {
+		return zero, &ProtocolError{Message: "missing sessions in resolve_user_sessions_response"}
+	}
+	return sessions, nil
+}
+
 func (c *Client) OperationsStatus(ctx context.Context) (OperationsStatus, error) {
 	var zero OperationsStatus
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
@@ -836,6 +890,7 @@ func (c *Client) connectAndServe() error {
 	c.stateMu.Lock()
 	c.conn = conn
 	c.authenticated = true
+	c.loginInfo = loginResp
 	c.stateMu.Unlock()
 
 	c.cfg.Handler.OnLogin(c.ctx, loginResp)
@@ -852,6 +907,7 @@ func (c *Client) connectAndServe() error {
 		c.conn = nil
 	}
 	c.authenticated = false
+	c.loginInfo = LoginInfo{}
 	c.stateMu.Unlock()
 
 	c.failAllPending(ErrDisconnected)
@@ -883,6 +939,7 @@ func (c *Client) expectLogin(env *pb.ServerEnvelope) (LoginInfo, error) {
 		return LoginInfo{
 			User:            userFromProto(body.LoginResponse.User),
 			ProtocolVersion: body.LoginResponse.ProtocolVersion,
+			SessionRef:      sessionRefFromProto(body.LoginResponse.SessionRef),
 		}, nil
 	case *pb.ServerEnvelope_Error:
 		c.stateMu.Lock()
@@ -976,6 +1033,8 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 		c.resolvePending(body.ListClusterNodesResponse.RequestId, requestResult{value: clusterNodesFromProto(body.ListClusterNodesResponse.Items)})
 	case *pb.ServerEnvelope_ListNodeLoggedInUsersResponse:
 		c.resolvePending(body.ListNodeLoggedInUsersResponse.RequestId, requestResult{value: loggedInUsersFromProto(body.ListNodeLoggedInUsersResponse.Items)})
+	case *pb.ServerEnvelope_ResolveUserSessionsResponse:
+		c.resolvePending(body.ResolveUserSessionsResponse.RequestId, requestResult{value: resolvedUserSessionsFromProto(body.ResolveUserSessionsResponse)})
 	case *pb.ServerEnvelope_OperationsStatusResponse:
 		c.resolvePending(body.OperationsStatusResponse.RequestId, requestResult{value: operationsStatusFromProto(body.OperationsStatusResponse.Status)})
 	case *pb.ServerEnvelope_MetricsResponse:

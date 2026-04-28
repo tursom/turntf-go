@@ -222,6 +222,7 @@ func (r *Runner) executeConnect(ctx context.Context, session *sessionRuntime, st
 	actual := map[string]any{
 		"user":             normalizeValue(login.User),
 		"protocol_version": login.ProtocolVersion,
+		"session_ref":      normalizeValue(login.SessionRef),
 	}
 	if err := matchSubset(resolveValue(step.Expect.Login, r.scopeVars(session)), actual); err != nil {
 		_ = client.Close()
@@ -518,6 +519,17 @@ func (r *Runner) callAction(ctx context.Context, client *turntf.Client, action s
 		}
 		payload := listPayload(items)
 		return payload, map[string]any{"ok": payload}, nil
+	case "resolve_user_sessions":
+		user, err := parseUserRefField(reqMap, "user")
+		if err != nil {
+			return nil, nil, err
+		}
+		resolved, err := client.ResolveUserSessions(ctx, user)
+		if err != nil {
+			return nil, nil, err
+		}
+		payload := map[string]any{"resolved_user_sessions": normalizeValue(resolved)}
+		return payload, map[string]any{"ok": payload}, nil
 	default:
 		return nil, nil, fmt.Errorf("unsupported action %q", action)
 	}
@@ -720,10 +732,18 @@ func parseSendPacketInput(values map[string]any) (turntf.SendPacketInput, error)
 	if err != nil {
 		return turntf.SendPacketInput{}, fmt.Errorf("delivery_mode: %w", err)
 	}
+	var targetSession turntf.SessionRef
+	if _, ok := values["target_session"]; ok {
+		targetSession, err = parseSessionRefField(values, "target_session", true)
+		if err != nil {
+			return turntf.SendPacketInput{}, err
+		}
+	}
 	return turntf.SendPacketInput{
-		Target:       target,
-		Body:         body,
-		DeliveryMode: turntf.DeliveryMode(mode),
+		Target:        target,
+		Body:          body,
+		DeliveryMode:  turntf.DeliveryMode(mode),
+		TargetSession: targetSession,
 	}, nil
 }
 
@@ -853,6 +873,29 @@ func parseUserRefField(values map[string]any, key string) (turntf.UserRef, error
 		return turntf.UserRef{}, fmt.Errorf("%s.%w", key, err)
 	}
 	return turntf.UserRef{NodeID: nodeID, UserID: userID}, nil
+}
+
+func parseSessionRefField(values map[string]any, key string, required bool) (turntf.SessionRef, error) {
+	raw, ok := values[key]
+	if !ok {
+		if required {
+			return turntf.SessionRef{}, fmt.Errorf("%s is required", key)
+		}
+		return turntf.SessionRef{}, nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return turntf.SessionRef{}, fmt.Errorf("%s must be an object", key)
+	}
+	servingNodeID, err := int64Field(m, "serving_node_id", true)
+	if err != nil {
+		return turntf.SessionRef{}, fmt.Errorf("%s.%w", key, err)
+	}
+	sessionID, err := stringField(m, "session_id", true)
+	if err != nil {
+		return turntf.SessionRef{}, fmt.Errorf("%s.%w", key, err)
+	}
+	return turntf.SessionRef{ServingNodeID: servingNodeID, SessionID: sessionID}, nil
 }
 
 func stringField(values map[string]any, key string, required bool) (string, error) {
