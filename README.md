@@ -1,11 +1,25 @@
 # turntf-go
 
-`turntf-go` 是 turntf 的 Go SDK，封装了文档里的两类客户端能力：
+`turntf-go` 是 turntf 的 Go SDK，面向两条客户端能力线：
 
-- WebSocket + Protobuf 长连接客户端
-- HTTP JSON 管理与查询客户端
+- `Client`：基于 WebSocket + Protobuf 的长连接客户端，负责登录、请求响应匹配、自动重连、消息持久化回调、`session_ref` 和会话定向瞬时包。
+- `HTTPClient`：基于 HTTP JSON 的轻量客户端，适合脚本、后台、初始化工具和调试。
 
-它的目标是让业务代码直接使用 Go API，而不是自己处理 WebSocket 生命周期、protobuf envelope、请求 ID 匹配、`body` 的 base64 编解码和 Bearer token 注入。`Client` 现在除 HTTP 登录外统一走 WebSocket RPC；`HTTPClient` 继续保留给脚本、后台和调试场景独立使用。
+SDK 的目标不是简单映射 REST 或 protobuf 字段，而是把业务接入时最容易出错的部分收进统一实现里，例如：
+
+- WebSocket 首帧登录和 `seen_messages` 上报
+- `MessagePushed` 的 `SaveMessage -> SaveCursor -> AckMessage` 顺序
+- 请求 ID 管理和 RPC 响应匹配
+- `body` 的 `[]byte` / JSON base64 转换
+- `session_ref`、`resolve_user_sessions` 和定向瞬时包
+
+## 文档导航
+
+- [Go SDK 使用总览](docs/sdk-guide.md)：推荐先读。覆盖定位、能力选型、配置项、生命周期、自动重连、错误处理、proto 生成约束。
+- [客户端全流程接入文档](docs/client-flow.md)：从创建用户、初始化本地游标到稳定收发消息的端到端流程。
+- [客户端 WebSocket 接口](docs/client-websocket.md)：`ClientEnvelope` / `ServerEnvelope` 级别的协议语义、`/ws/client` 与 `/ws/realtime` 边界。
+- [运维与上线手册](docs/operations.md)：上线、恢复、监控相关说明。
+- [Demo YAML 示例](docs/examples/)：多节点、多 session 的收发验证脚本。
 
 ## 安装
 
@@ -13,30 +27,27 @@
 go get github.com/tursom/turntf-go
 ```
 
-## 功能
+## 选型建议
 
-- WebSocket 首帧登录
-- 登录返回 `session_ref`
-- 自动重连与重登录
-- `seen_messages` 重放去重
-- `MessagePushed` 自动执行 `保存消息 -> 保存游标 -> ack`
-- `SendMessage`
-- `SendPacket` / `SendPacketToSession`
-- `ResolveUserSessions`
-- `Ping`
-- HTTP 登录
-- WS 创建用户、订阅管理、黑名单管理、查询消息、集群查询、解析在线 session、发消息、发瞬时包
+优先使用 `Client` 的场景：
 
-## 包内容
+- 需要实时收消息或瞬时包
+- 需要自动重连、登录生命周期回调和本地游标管理
+- 需要通过同一条已登录连接执行管理 / 查询 RPC
 
-- `turntf`：高级 SDK API
-- `internal/proto`：由 `proto/client.proto` 生成的 protobuf 类型
+优先使用 `HTTPClient` 的场景：
 
-默认推荐直接用 `turntf` 包，不直接依赖 `ClientEnvelope` / `ServerEnvelope`。
+- 只做登录、建用户、简单发消息或后台脚本
+- 不需要本地 `CursorStore`
+- 不需要长连接、实时消息或定向 packet
+
+补充说明：
+
+- `Client.Connect()` 只依赖 `Config.Credentials` 做 WebSocket 首帧登录，不需要 HTTP token。
+- `Client.Login()` 只是复用内置 `HTTPClient` 调用 `/auth/login`，便于你在同一个对象上顺手拿管理员 Bearer token。
+- `Client` 上保留了部分带 `token string` 参数的方法名以兼容旧调用方式，但这些方法当前实际走已登录 WebSocket RPC，`token` 参数不会参与鉴权。
 
 ## 快速开始
-
-### 一个 `Client`：HTTP 登录 + WebSocket RPC
 
 ```go
 package main
@@ -49,22 +60,25 @@ import (
 	turntf "github.com/tursom/turntf-go"
 )
 
-type store struct {
-	*turntf.MemoryCursorStore
-}
-
 type handler struct{}
 
 func (handler) OnLogin(_ context.Context, info turntf.LoginInfo) {
-	log.Printf("login ok: user=%d protocol=%s session=%d/%s", info.User.UserID, info.ProtocolVersion, info.SessionRef.ServingNodeID, info.SessionRef.SessionID)
+	log.Printf(
+		"login ok: user=%d:%d session=%d/%s protocol=%s",
+		info.User.NodeID,
+		info.User.UserID,
+		info.SessionRef.ServingNodeID,
+		info.SessionRef.SessionID,
+		info.ProtocolVersion,
+	)
 }
 
 func (handler) OnMessage(_ context.Context, msg turntf.Message) {
-	log.Printf("message: recipient=%d:%d seq=%d sender=%d:%d body=%x", msg.Recipient.NodeID, msg.Recipient.UserID, msg.Seq, msg.Sender.NodeID, msg.Sender.UserID, msg.Body)
+	log.Printf("message: cursor=%d/%d from=%d:%d", msg.NodeID, msg.Seq, msg.Sender.NodeID, msg.Sender.UserID)
 }
 
 func (handler) OnPacket(_ context.Context, packet turntf.Packet) {
-	log.Printf("packet: id=%d recipient=%d:%d sender=%d:%d", packet.PacketID, packet.Recipient.NodeID, packet.Recipient.UserID, packet.Sender.NodeID, packet.Sender.UserID)
+	log.Printf("packet: id=%d target_session=%d/%s", packet.PacketID, packet.TargetSession.ServingNodeID, packet.TargetSession.SessionID)
 }
 
 func (handler) OnError(_ context.Context, err error) {
@@ -83,7 +97,7 @@ func main() {
 			UserID:   1025,
 			Password: turntf.MustPlainPassword("alice-password"),
 		},
-		CursorStore:           store{turntf.NewMemoryCursorStore()},
+		CursorStore:           turntf.NewMemoryCursorStore(),
 		Handler:               handler{},
 		InitialReconnectDelay: time.Second,
 		MaxReconnectDelay:     30 * time.Second,
@@ -97,367 +111,114 @@ func main() {
 
 	ctx := context.Background()
 
-	token, err := client.Login(ctx, 4096, 1, "root")
-	if err != nil {
+	if err := client.Connect(ctx); err != nil {
 		log.Fatal(err)
 	}
 
-if err := client.Connect(ctx); err != nil {
-	log.Fatal(err)
-}
-
-if login, ok := client.CurrentLogin(); ok {
-	log.Printf("connected session: %d/%s", login.SessionRef.ServingNodeID, login.SessionRef.SessionID)
-}
-
-	_, err = client.CreateUser(ctx, token, turntf.CreateUserRequest{
-		Username: "alice",
-		Password: turntf.MustPlainPassword("alice-password"),
-		Role:     "user",
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	_, err = client.SendMessage(ctx, turntf.SendMessageInput{
+	msg, err := client.SendMessage(ctx, turntf.SendMessageInput{
 		Target: turntf.UserRef{NodeID: 4096, UserID: 1025},
 		Body:   []byte("hello"),
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-}
-```
+	log.Printf("sent persistent message: cursor=%d/%d", msg.NodeID, msg.Seq)
 
-如果你只想单独使用 HTTP，也仍然可以保留原来的轻量入口：
-
-```go
-package main
-
-import (
-	"context"
-	"log"
-
-	turntf "github.com/tursom/turntf-go"
-)
-
-func main() {
-	ctx := context.Background()
-	httpClient := turntf.NewHTTPClient("http://127.0.0.1:8080")
-
-	token, err := httpClient.Login(ctx, 4096, 1, "root")
+	sessions, err := client.ResolveUserSessions(ctx, turntf.UserRef{NodeID: 4096, UserID: 1025})
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	user, err := httpClient.CreateUser(ctx, token, turntf.CreateUserRequest{
-		Username: "alice",
-		Password: turntf.MustPlainPassword("alice-password"),
-		Role:     "user",
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("created user: node=%d user=%d", user.NodeID, user.UserID)
-
-	err = httpClient.CreateSubscription(
-		ctx,
-		token,
-		turntf.UserRef{NodeID: 4096, UserID: 1025},
-		turntf.UserRef{NodeID: 4096, UserID: 1026},
-	)
-	if err != nil {
-		log.Fatal(err)
+	if len(sessions.Sessions) > 0 {
+		accepted, err := client.SendPacketToSession(
+			ctx,
+			sessions.User,
+			sessions.Sessions[0].Session,
+			[]byte("ephemeral"),
+			turntf.DeliveryModeRouteRetry,
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("transient accepted: packet=%d target=%d/%s", accepted.PacketID, accepted.TargetSession.ServingNodeID, accepted.TargetSession.SessionID)
 	}
 }
 ```
 
-## WebSocket API
-
-### `NewClient`
+只想单独使用 HTTP 时：
 
 ```go
-client, err := turntf.NewClient(turntf.Config{...})
-```
-
-关键配置项：
-
-- `BaseURL`
-  传 `http://host:port` 或 `https://host:port` 即可，SDK 会自动拼成 `/ws/client`
-- `Credentials`
-  WebSocket 首帧登录使用的 `(node_id, user_id, password)`；推荐传 `turntf.MustPlainPassword(...)` 或 `turntf.HashedPassword(...)`
-- `CursorStore`
-  业务侧的消息持久化和游标持久化实现
-- `Handler`
-  事件回调
-- `InitialReconnectDelay`
-  自动重连起始退避
-- `MaxReconnectDelay`
-  自动重连最大退避
-- `PingInterval`
-  应用层 ping 周期
-- `RequestTimeout`
-  单次 `SendMessage` / `SendPacket` / `Ping` 超时
-
-### `CursorStore`
-
-`CursorStore` 是 SDK 与业务持久层的接缝：
-
-```go
-type CursorStore interface {
-	LoadSeenMessages(context.Context) ([]MessageCursor, error)
-	SaveMessage(context.Context, Message) error
-	SaveCursor(context.Context, MessageCursor) error
-}
-```
-
-`MessagePushed` 到达后，SDK 会按固定顺序调用：
-
-1. `SaveMessage`
-2. `SaveCursor`
-3. 发送 `AckMessage`
-
-这和接入文档里的可靠性要求一致。不要把 ack 放到持久化之前。
-
-如果只是本地测试，可以直接用：
-
-```go
-store := turntf.NewMemoryCursorStore()
-```
-
-## Demo YAML Runner
-
-仓库里现在带了一个只走 WebSocket 的 demo 运行器，可以用 YAML 在一个文件里编排多节点、多 session、并行收发测试。
-
-示例脚本：
-
-- [docs/examples/demo-cross-node.yaml](docs/examples/demo-cross-node.yaml)：多 session 并行收发消息
-- [docs/examples/demo-admin-blacklist.yaml](docs/examples/demo-admin-blacklist.yaml)：黑名单管理与集群发现字段断言
-
-运行方式：
-
-```bash
-go run ./cmd/turntf-demo -f docs/examples/demo-cross-node.yaml
-```
-
-配置要点：
-
-- 顶层 `nodes` 定义可连接节点和 `base_url`
-- `sessions` 为每个登录连接指定目标节点、用户身份和可选 `seen_messages`
-- `script` 支持顺序步骤，以及 `parallel` + `barrier` 的并行收发验证
-- `request` 和 `expect_event` 都显式绑定 `session`
-- `body` / `profile_json` 这类 bytes 字段默认按文本写，需要 JSON 或二进制时显式声明 `format`
-- `request.action` 支持 `send_message`、`send_packet`、`ping`、用户管理、订阅管理、黑名单管理、事件/运维/集群查询、`resolve_user_sessions`
-
-### `Handler`
-
-```go
-type Handler interface {
-	OnLogin(context.Context, LoginInfo)
-	OnMessage(context.Context, Message)
-	OnPacket(context.Context, Packet)
-	OnError(context.Context, error)
-	OnDisconnect(context.Context, error)
-}
-```
-
-也可以先用空实现：
-
-```go
-Handler: turntf.NopHandler{},
-```
-
-### 集成管理与查询 RPC
-
-`Client` 上的管理、查询、发消息能力现在都通过已登录的 WebSocket 连接完成；`Login` 仍然使用 HTTP：
-
-```go
-token, err := client.Login(ctx, 4096, 1, "root")
-if err := client.Connect(ctx); err != nil { ... }
-user, err := client.CreateUser(ctx, token, turntf.CreateUserRequest{...})
-err = client.CreateSubscription(ctx, token, userRef, channelRef)
-messages, err := client.ListMessages(ctx, token, target, 20)
-entry, err := client.BlockUser(ctx, token, owner, blocked)
-blockedUsers, err := client.ListBlockedUsers(ctx, token, owner)
-entry, err = client.UnblockUser(ctx, token, owner, blocked)
-nodes, err := client.ListClusterNodes(ctx)
-users, err := client.ListNodeLoggedInUsers(ctx, 4096)
-resolved, err := client.ResolveUserSessions(ctx, target)
-message, err := client.PostMessage(ctx, token, target, payload)
-err = client.PostPacket(ctx, token, target.NodeID, target, payload, turntf.DeliveryModeRouteRetry)
-```
-
-如果你想拿到底层 HTTP 客户端本身，也可以：
-
-```go
-httpClient := client.HTTP()
-```
-
-### 发送持久化消息
-
-```go
-msg, err := client.SendMessage(ctx, turntf.SendMessageInput{
-	Target: turntf.UserRef{NodeID: 4096, UserID: 1025},
-	Body:   []byte{0xff, 0x00},
-})
-```
-
-返回值是服务端 `send_message_response.message` 映射成的 `turntf.Message`。
-
-### 发送目标用户瞬时包
-
-```go
-accepted, err := client.SendPacket(ctx, turntf.SendPacketInput{
-	Target:       turntf.UserRef{NodeID: 8192, UserID: 1025},
-	Body:         []byte{0xff, 0x00},
-	DeliveryMode: turntf.DeliveryModeRouteRetry,
-	// 可选：只投递到指定在线 session
-	TargetSession: turntf.SessionRef{ServingNodeID: 8192, SessionID: "session-id"},
-})
-```
-
-支持的发送模式：
-
-- `turntf.DeliveryModeBestEffort`
-- `turntf.DeliveryModeRouteRetry`
-
-如果你已经解析出目标用户的在线 session，也可以直接用便捷方法：
-
-```go
-accepted, err := client.SendPacketToSession(
-	ctx,
-	turntf.UserRef{NodeID: 8192, UserID: 1025},
-	turntf.SessionRef{ServingNodeID: 8192, SessionID: "session-id"},
-	[]byte("hello"),
-	turntf.DeliveryModeRouteRetry,
-)
-```
-
-### 解析在线 session
-
-```go
-resolved, err := client.ResolveUserSessions(ctx, turntf.UserRef{NodeID: 8192, UserID: 1025})
-if err != nil {
-	log.Fatal(err)
-}
-
-for _, item := range resolved.Sessions {
-	log.Printf("session=%d/%s transport=%s transient=%v", item.Session.ServingNodeID, item.Session.SessionID, item.Transport, item.TransientCapable)
-}
-```
-
-### Ping
-
-```go
-err := client.Ping(ctx)
-```
-
-## HTTP API
-
-### 登录
-
-```go
+httpClient := turntf.NewHTTPClient("http://127.0.0.1:8080")
 token, err := httpClient.Login(ctx, 4096, 1, "root")
-```
-
-### 创建用户 / channel
-
-```go
 user, err := httpClient.CreateUser(ctx, token, turntf.CreateUserRequest{
 	Username: "alice",
 	Password: turntf.MustPlainPassword("alice-password"),
 	Role:     "user",
 })
-
-channel, err := httpClient.CreateChannel(ctx, token, turntf.CreateUserRequest{
-	Username: "orders",
-})
+message, err := httpClient.PostMessage(ctx, token, turntf.UserRef{
+	NodeID: user.NodeID,
+	UserID: user.UserID,
+}, []byte("hello"))
 ```
 
-### 建立订阅
+## 核心语义
 
-```go
-err := httpClient.CreateSubscription(
-	ctx,
-	token,
-	turntf.UserRef{NodeID: 4096, UserID: 1025},
-	turntf.UserRef{NodeID: 4096, UserID: 1026},
-)
+- `session_ref`：来自 `LoginResponse`，标识当前这次登录对应的在线连接。`CurrentLogin()`、`OnLogin()` 和 `ResolveUserSessions()` 都会暴露它。
+- `seen_messages`：每次建连前，SDK 都会从 `CursorStore.LoadSeenMessages()` 读取已持久化游标，并在首帧登录时一并上报。
+- 持久化顺序：SDK 固定按 `SaveMessage -> SaveCursor -> AckMessage` 处理 `MessagePushed`，不要把 ack 提前到本地落库之前。
+- `AckMessage`：只用于当前连接内的去重提示。真正的重连恢复依赖 `seen_messages`，而不是依赖服务端记住你上一次的 ack。
+- `SendMessageResponse.message`：高层 SDK 也会执行 `SaveMessage -> SaveCursor`，这样发送成功的持久化消息能和推送消息共用一套本地幂等逻辑。
+- 瞬时包：`SendPacket` / `SendPacketToSession` 只返回“路由层已受理”，不代表目标用户一定已经收到。
+
+## 常用 API
+
+长连接 `Client`：
+
+- 生命周期：`Connect`、`Close`、`CurrentLogin`、`Ping`
+- 持久化消息：`SendMessage`、`WSListMessages`
+- 瞬时包：`SendPacket`、`SendPacketToSession`
+- 用户管理：`CreateUser`、`CreateChannel`、`GetUser`、`UpdateUser`、`DeleteUser`
+- 关系管理：`SubscribeChannel`、`UnsubscribeChannel`、`ListSubscriptions`
+- 黑名单：`BlockUser`、`UnblockUser`、`ListBlockedUsers`
+- 运维与集群：`ListClusterNodes`、`ListNodeLoggedInUsers`、`ResolveUserSessions`、`ListEvents`、`OperationsStatus`、`Metrics`
+
+HTTP `HTTPClient`：
+
+- 登录：`Login`、`LoginWithPassword`
+- 用户：`CreateUser`、`CreateChannel`
+- 消息：`ListMessages`、`PostMessage`、`PostPacket`
+- 集群：`ListClusterNodes`、`ListNodeLoggedInUsers`
+- 关系：`CreateSubscription`、`BlockUser`、`UnblockUser`、`ListBlockedUsers`
+- 通用 attachment：`UpsertAttachment`、`DeleteAttachment`、`ListAttachments`
+
+## Demo Runner
+
+仓库内置了一个只走 WebSocket 的 YAML demo 运行器：
+
+```bash
+go run ./cmd/turntf-demo -f docs/examples/demo-cross-node.yaml
 ```
 
-### 查询消息
+示例文件：
 
-```go
-messages, err := httpClient.ListMessages(
-	ctx,
-	token,
-	turntf.UserRef{NodeID: 4096, UserID: 1025},
-	20,
-)
-```
+- [docs/examples/demo-cross-node.yaml](docs/examples/demo-cross-node.yaml)
+- [docs/examples/demo-admin-blacklist.yaml](docs/examples/demo-admin-blacklist.yaml)
 
-### HTTP 发消息
+## Proto 生成
 
-```go
-message, err := httpClient.PostMessage(
-	ctx,
-	token,
-	turntf.UserRef{NodeID: 4096, UserID: 1025},
-	[]byte{0xff, 0x00},
-)
-```
+- 源文件：`proto/client.proto`
+- 生成文件：`internal/proto/client.pb.go`
+- 不要手改生成代码
 
-### HTTP 发瞬时包
-
-```go
-err := httpClient.PostPacket(
-	ctx,
-	token,
-	8192,
-	turntf.UserRef{NodeID: 8192, UserID: 1025},
-	[]byte{0xff, 0x00},
-	turntf.DeliveryModeRouteRetry,
-)
-```
-
-### 集群查询
-
-```go
-nodes, err := httpClient.ListClusterNodes(ctx, token)
-users, err := httpClient.ListNodeLoggedInUsers(ctx, token, 4096)
-```
-
-HTTP `body` 在 SDK 外部统一使用 `[]byte`，SDK 内部会自动做 JSON base64 编解码。
-
-## 错误处理
-
-SDK 目前会返回几类主要错误：
-
-- `*turntf.ServerError`
-  服务端返回的协议错误，包含 `Code`、`Message`、`RequestID`
-- `*turntf.ProtocolError`
-  本地发现协议不符合预期，比如响应形状错误
-- `*turntf.ConnectionError`
-  建连、读写过程中的网络错误
-
-示例：
-
-```go
-var serverErr *turntf.ServerError
-if errors.As(err, &serverErr) {
-	log.Printf("server error: code=%s message=%s request=%d", serverErr.Code, serverErr.Message, serverErr.RequestID)
-}
-```
-
-`unauthorized` 登录错误会停止自动重连。
-
-## 重新生成 protobuf
-
-仓库里已经带上了生成后的文件。如果你修改了 [proto/client.proto](proto/client.proto)，可以重新生成：
+重新生成：
 
 ```bash
 go generate ./...
+```
+
+或：
+
+```bash
+./scripts/gen-proto.sh
 ```
 
 ## 测试
@@ -465,14 +226,3 @@ go generate ./...
 ```bash
 go test ./...
 ```
-
-当前测试覆盖了：
-
-- WebSocket 登录成功
-- `MessagePushed` 的持久化与 ack 顺序
-- `SendMessage` / `Ping` 请求匹配
-- `unauthorized` 停止自动重连
-- 断线后使用 `seen_messages` 重连
-- WS 集群节点与节点在线用户查询
-- HTTP 集群节点与节点在线用户查询
-- HTTP base64 编解码与 Bearer token 注入

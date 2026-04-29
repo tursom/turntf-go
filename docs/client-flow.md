@@ -1,95 +1,90 @@
 # 客户端全流程接入文档
 
-本文档面向业务客户端和接入方，描述从准备账号到稳定收发消息的完整流程。底层 WebSocket 协议字段见 [客户端 WebSocket 接口](/root/dev/sys/turntf/docs/client-websocket.md)。
+本文档面向 `turntf-go` 使用者，描述从准备账号到稳定收发消息的完整流程。它以 Go SDK 接入为主线，重点解释业务侧真正要落地的状态和顺序；更底层的 envelope 字段见 [客户端 WebSocket 接口](client-websocket.md)，SDK 结构说明见 [Go SDK 使用总览](sdk-guide.md)。
 
-## 角色与接口
+## 1. 明确你的接入形态
 
-客户端会用到两类接口：
+接入前先判断你是哪一种客户端：
 
-- HTTP JSON API：保留用于脚本、管理后台和调试。
-- WebSocket Protobuf API：现已覆盖除 HTTP 登录外的全部客户端能力，既可用于普通客户端收发消息，也可用于管理员执行用户、订阅、历史和运维查询。
+- 普通实时客户端：长期在线，既收持久化消息，也收瞬时包
+- 只关心瞬时流量的在线客户端：只需要 `PacketPushed`
+- 管理端或脚本：只用 HTTP 登录、建用户、发测试消息
+- 管理端长连接：需要通过已登录 WebSocket 做运维查询、解析在线 session 或定向 packet
 
-核心地址：
+对应建议：
 
-- `POST /auth/login`：HTTP 登录，返回 Bearer token，主要用于管理后台或 HTTP 客户端。
-- `POST /users`：管理员创建普通用户或 channel。
-- `POST /nodes/{node_id}/users/{user_id}/subscriptions`：维护用户对 channel 的订阅。
-- `GET /nodes/{node_id}/users/{user_id}/messages?limit=N`：HTTP 查询消息，`body` 是 base64 字节。
-- `POST /nodes/{node_id}/users/{user_id}/messages`：HTTP 写消息，`body` 是 base64 字节。
-- `POST /nodes/{node_id}/users/{user_id}/messages`：HTTP 发送消息；当 `delivery_kind = transient` 时走不落库瞬时投递。
-- `GET /ws/client`：客户端长连接，连接后第一帧必须是 protobuf `LoginRequest`；登录成功后还可继续发送用户管理、订阅管理、历史查询和运维查询 RPC。
+| 场景 | 推荐入口 |
+| --- | --- |
+| 实时收消息 | `Client` |
+| 只做后台脚本 | `HTTPClient` |
+| 既要管理能力又要实时会话状态 | `Client`，必要时配合 `Client.Login()` |
 
-## 端到端流程
+## 2. 服务端准备
 
-1. 服务端、管理后台或管理员 WS 客户端创建登录用户。
-2. 可选：管理员创建 channel 用户。
-3. 可选：用户本人或管理员维护 channel 订阅。
-4. 客户端本地初始化消息表和游标表。
-5. 客户端连接 `GET /ws/client`。
-6. 客户端发送第一帧 `ClientEnvelope.login`，携带 `node_id`、`user_id`、`password` 和本地已持久化游标 `seen_messages`。
-7. 服务端返回 `LoginResponse`，随后补发当前用户可见且未见过的历史消息。
-8. 客户端收到 `MessagePushed` 后先落库，再保存 `(node_id, seq)` 游标，最后可选发送 `AckMessage`。
-9. 客户端可继续通过同一条 WebSocket 发送查询或管理 RPC，例如 `get_user`、`list_messages`、`subscribe_channel`、`list_cluster_nodes`、`list_events`、`metrics`。
-10. 客户端通过同一条 WebSocket 发送 `SendMessageRequest` 写普通持久化消息。
-11. 如需向在线目标用户发送非持久化数据包，客户端直接把 `target` 设为最终目标用户，并把 `delivery_kind` 设为 `TRANSIENT`。
-12. 网络断开后，客户端用本地游标重连，服务端按 `seen_messages` 跳过已持久化消息。
+### 2.1 获取管理员 token
 
-## 服务端准备
+如果你要创建用户、channel 或准备测试数据，先拿管理员 token：
 
-### 创建管理员 token
-
-管理员先通过 HTTP 登录获取 token：
-
-```bash
-ADMIN_TOKEN="$(
-  curl -sS -X POST http://127.0.0.1:8080/auth/login \
-    -H 'Content-Type: application/json' \
-    -d '{"node_id":4096,"user_id":1,"password":"root"}' \
-  | jq -r .token
-)"
+```go
+httpClient := turntf.NewHTTPClient("http://127.0.0.1:8080")
+token, err := httpClient.Login(ctx, 4096, 1, "root")
 ```
 
-### 创建普通用户
+### 2.2 创建普通用户
 
-```bash
-curl -sS -X POST http://127.0.0.1:8080/users \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"alice-password","role":"user"}'
+```go
+alice, err := httpClient.CreateUser(ctx, token, turntf.CreateUserRequest{
+	Username: "alice",
+	Password: turntf.MustPlainPassword("alice-password"),
+	Role:     "user",
+})
 ```
 
-响应中的 `node_id` 和 `user_id` 是客户端 WebSocket 登录时使用的身份。
+响应中的 `(node_id, user_id)` 就是后续 WebSocket 登录身份。
 
-### 创建 channel
+### 2.3 创建 channel
 
-channel 是不可登录的组播地址：
-
-```bash
-curl -sS -X POST http://127.0.0.1:8080/users \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"orders","role":"channel"}'
+```go
+orders, err := httpClient.CreateChannel(ctx, token, turntf.CreateUserRequest{
+	Username: "orders",
+})
 ```
 
-### 订阅 channel
+`role=channel` 用户本身不能登录，只用于接收订阅消息。
 
-```bash
-curl -sS -X POST http://127.0.0.1:8080/nodes/4096/users/1025/subscriptions \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -d '{"channel_node_id":4096,"channel_user_id":1026}'
+### 2.4 建立订阅
+
+```go
+err = httpClient.CreateSubscription(
+	ctx,
+	token,
+	turntf.UserRef{NodeID: alice.NodeID, UserID: alice.UserID},
+	turntf.UserRef{NodeID: orders.NodeID, UserID: orders.UserID},
+)
 ```
 
-订阅只影响订阅时间之后的 channel 消息。订阅前的 channel 历史不会补给该用户。
+补充说明：
 
-## 客户端本地状态
+- `HTTPClient.CreateSubscription()` 走的是 SDK 内部 attachment 路径封装
+- `Client.SubscribeChannel()` 走的是已登录 WebSocket attachment RPC
+- 两者语义一致，都是“把用户订阅到 channel”
 
-客户端至少需要持久化两类数据：
+## 3. 初始化本地状态
 
-- 消息表：保存完整 `Message`，包括 `recipient_node_id`、`recipient_user_id`、`node_id`、`seq`、`sender_node_id`、`sender_user_id`、`body`、`created_at_hlc`。
-- 游标表：保存已成功持久化消息的 `(node_id, seq)`。
+业务侧至少要持久化两类数据：
 
-如果业务使用瞬时包，可选再维护一张短期去重表记录 `packet_id`；这属于应用层优化，不属于协议可靠性要求。
+- 消息本身
+- 已安全持久化的游标 `(node_id, seq)`
+
+`CursorStore` 接口：
+
+```go
+type CursorStore interface {
+	LoadSeenMessages(context.Context) ([]MessageCursor, error)
+	SaveMessage(context.Context, Message) error
+	SaveCursor(context.Context, MessageCursor) error
+}
+```
 
 推荐本地唯一键：
 
@@ -97,231 +92,220 @@ curl -sS -X POST http://127.0.0.1:8080/nodes/4096/users/1025/subscriptions \
 messages primary key: (node_id, seq)
 ```
 
-如果客户端需要区分消息目标，可额外建立索引：
+如果你只做本地演示，可先用内存实现：
 
-```text
-target index: (recipient_node_id, recipient_user_id, created_at_hlc)
+```go
+store := turntf.NewMemoryCursorStore()
 ```
 
-处理顺序必须是：
+## 4. 创建 `Client`
 
-1. 收到 `MessagePushed`。
-2. 按 `(node_id, seq)` 做幂等检查。
-3. 将消息写入本地数据库。
-4. 将 `(node_id, seq)` 写入本地游标表。
-5. 可选发送 `AckMessage`。
+最常用配置示例：
 
-不要先 ack 再落库，否则断线后可能丢失客户端尚未持久化的消息。
-
-## WebSocket 首次连接
-
-客户端连接：
-
-```text
-ws://127.0.0.1:8080/ws/client
+```go
+client, err := turntf.NewClient(turntf.Config{
+	BaseURL: "http://127.0.0.1:8080",
+	Credentials: turntf.Credentials{
+		NodeID:   alice.NodeID,
+		UserID:   alice.UserID,
+		Password: turntf.MustPlainPassword("alice-password"),
+	},
+	CursorStore:           store,
+	Handler:               myHandler{},
+	InitialReconnectDelay: time.Second,
+	MaxReconnectDelay:     30 * time.Second,
+	PingInterval:          30 * time.Second,
+	RequestTimeout:        10 * time.Second,
+})
 ```
 
-连接升级后，第一帧必须是 binary protobuf：
+几个最关键的配置：
+
+- `BaseURL`：传 `http://` 或 `https://` 即可，SDK 会自动切成 `ws://` 或 `wss://`
+- `Credentials`：用于 WebSocket 首帧登录
+- `CursorStore`：决定 `seen_messages` 和本地恢复能力
+- `Handler`：接收登录、消息、packet、错误、断线回调
+
+## 5. 首次连接与登录
+
+### 5.1 业务侧调用
+
+```go
+if err := client.Connect(ctx); err != nil {
+	log.Fatal(err)
+}
+```
+
+### 5.2 SDK 内部做了什么
+
+`turntf-go` 会自动完成下面这条流程：
+
+1. 调 `LoadSeenMessages()`
+2. 拨号 `/ws/client` 或 `/ws/realtime`
+3. 发送首帧 `ClientEnvelope.login`
+4. 等待 `login_response`
+5. 保存当前 `session_ref`
+6. 触发 `OnLogin()`
+
+对应的首帧原始 proto 形状是：
 
 ```protobuf
 ClientEnvelope {
   login: LoginRequest {
-    node_id: 4096
-    user_id: 1025
-    password: "alice-password"
+    user: { node_id: 4096, user_id: 1025 }
+    password: "$2a$10$..."
     seen_messages: []
   }
 }
 ```
 
-服务端成功返回：
+注意这里的登录身份在 `user` 字段里，而不是旧文档中的顶层 `node_id` / `user_id`。
 
-```protobuf
-ServerEnvelope {
-  login_response: LoginResponse {
-    user: {
-      node_id: 4096
-      user_id: 1025
-      username: "alice"
-      role: "user"
-    }
-    protocol_version: "client-v1alpha1"
-    session_ref: {
-      serving_node_id: 4096
-      session_id: "session-a"
-    }
-  }
-}
+### 5.3 登录成功后拿到什么
+
+```go
+info, ok := client.CurrentLogin()
 ```
 
-登录成功后，服务端立即开始补发历史消息。客户端要准备好在 `LoginResponse` 后连续处理多个 `MessagePushed`。如果业务需要做点对点瞬时投递，应该先保存 `session_ref`，它标识当前在线连接。
+你会得到：
 
-如果其他节点或本节点把瞬时包转发给当前用户，客户端还可能收到 `PacketPushed`。这类数据包不会进入历史补发。
+- `info.User`
+- `info.ProtocolVersion`
+- `info.SessionRef`
 
-## 接收消息
+`session_ref` 标识当前这条在线连接，后续做定向瞬时包时会用到。
 
-服务端推送：
+## 6. 接收持久化消息
 
-```protobuf
-ServerEnvelope {
-  message_pushed: MessagePushed {
-    message: {
-      recipient: { node_id: 4096, user_id: 1025 }
-      node_id: 4096
-      seq: 3
-      sender: { node_id: 4096, user_id: 1 }
-      body: "\xff\x00payload"
-      created_at_hlc: "..."
-    }
-  }
-}
+登录成功后，如果不是 transient-only，会先收到历史补发，然后收到实时推送。
+
+高层 SDK 在收到 `MessagePushed` 后固定执行：
+
+1. `SaveMessage`
+2. `SaveCursor`
+3. `AckMessage`
+4. `OnMessage`
+
+这条顺序不要改成：
+
+- 先 ack 再落库
+- 先回调业务再写游标
+
+因为断线恢复真正依赖的是“本地已经保存了哪些游标”，而不是服务端是否见过你的 ack。
+
+业务侧建议：
+
+- 让 `SaveMessage` 和 `SaveCursor` 都具备幂等性
+- 监控 `OnError()`，因为本地持久化失败会从这里暴露
+- 把 `(node_id, seq)` 作为客户端消息唯一标识
+
+## 7. 发送持久化消息
+
+```go
+msg, err := client.SendMessage(ctx, turntf.SendMessageInput{
+	Target: turntf.UserRef{NodeID: 4096, UserID: 1025},
+	Body:   []byte("hello"),
+})
 ```
 
-客户端处理逻辑：
+成功后：
 
-```text
-cursor = (message.node_id, message.seq)
-if cursor exists locally:
-    ignore message
-else:
-    persist message
-    persist cursor
-    send AckMessage(cursor) if connection is still open
+- 服务端返回 `send_message_response.message`
+- SDK 会再次执行 `SaveMessage -> SaveCursor`
+- 返回值 `msg` 就是这条服务端确认写入后的消息
+
+这意味着“自己发出去的持久化消息”和“别人推给自己的持久化消息”可以共用同一套本地幂等逻辑。
+
+## 8. `session_ref` 与定向瞬时包
+
+### 8.1 为什么需要 `session_ref`
+
+同一个用户可以同时在线多条连接。若你只想把瞬时包发给其中某一条，需要：
+
+1. 先知道目标用户当前有哪些在线 session
+2. 再指定某一个 `session_ref`
+
+### 8.2 查询在线 session
+
+```go
+resolved, err := client.ResolveUserSessions(ctx, target)
 ```
 
-可见性规则：
+返回值里有两组信息：
 
-- 普通用户能看到发给自己的消息。
-- 普通用户能看到所有 broadcast 消息。
-- 普通用户能看到订阅后发送到已订阅 channel 的消息。
-- 管理员能看到任意目标地址的消息。
+- `Presence`：按节点聚合的在线态
+- `Sessions`：每条可投递 session 的明细，可直接拿去定向发送
 
-瞬时包规则：
+### 8.3 定向发送
 
-- `PacketPushed` 只投递给当前在线的目标用户连接。
-- 它没有 `(node_id, seq)` 游标，不参与 ack 或历史补发。
-- `route_retry` 仅表示节点间短时重试寻路，仍然不是可靠送达。
-
-## 发送消息
-
-客户端通过同一条 WebSocket 发送：
-
-```protobuf
-ClientEnvelope {
-  send_message: SendMessageRequest {
-    request_id: 42
-    target: { node_id: 4096, user_id: 1025 }
-    body: "\xff\x00payload"
-  }
-}
+```go
+accepted, err := client.SendPacketToSession(
+	ctx,
+	target,
+	resolved.Sessions[0].Session,
+	[]byte("ephemeral"),
+	turntf.DeliveryModeRouteRetry,
+)
 ```
 
-成功返回：
+要点：
 
-```protobuf
-ServerEnvelope {
-  send_message_response: SendMessageResponse {
-    request_id: 42
-    message: {
-      recipient: { node_id: 4096, user_id: 1025 }
-      node_id: 4096
-      seq: 4
-      sender: { node_id: 4096, user_id: 1025 }
-      body: "\xff\x00payload"
-      created_at_hlc: "..."
-    }
-  }
-}
+- `accepted` 代表路由层已受理
+- 不代表目标连接一定已经收到
+- 瞬时包不会落库、不会补发、不会参与 `seen_messages`
+
+## 9. `TransientOnly` 与 `/ws/realtime`
+
+### 9.1 只收瞬时流量
+
+如果你只关心瞬时包，不想接持久化消息，可以在 `Config` 中开启：
+
+```go
+TransientOnly: true,
 ```
 
-客户端应把 `send_message_response.message` 也按普通消息落库，并保存 `(node_id, seq)`。服务端当前会在同连接中把该消息标记为已见，通常不会再重复推送；客户端仍要按 `(node_id, seq)` 幂等处理。
+效果：
 
-发送目标用户瞬时包：
+- 登录成功后不会做持久化历史补发
+- 不会继续接收 `MessagePushed`
+- 仍可接收 `PacketPushed`
 
-```protobuf
-ClientEnvelope {
-  send_message: SendMessageRequest {
-    request_id: 43
-    target: { node_id: 8192, user_id: 1025 }
-    body: "\xff\x00payload"
-    delivery_kind: CLIENT_DELIVERY_KIND_TRANSIENT
-    delivery_mode: CLIENT_DELIVERY_MODE_BEST_EFFORT
-    target_session: {
-      serving_node_id: 8192
-      session_id: "session-b"
-    }
-  }
-}
+### 9.2 专用实时流入口
+
+如果你还希望服务端严格限制这条连接只做实时在线态 / transient 流量，可再开启：
+
+```go
+RealtimeStream: true,
 ```
 
-如果填了 `target_session`，服务端只会把瞬时包路由到该在线 session；`PacketPushed` 和 `send_message_response.transient_accepted` 里也会回显这个字段。成功后服务端返回 `send_message_response.transient_accepted`。这只表示瞬时包已进入本地路由层，不代表目标用户已经收到。
+这会把连接路径切到 `/ws/realtime`，并额外限制：
 
-发送权限：
+- 只允许 transient `send_message`
+- 不允许 `list_messages`
+- 不允许 attachment RPC
+- 不允许管理员运维 RPC
 
-- 普通用户可以给自己发送。
-- 普通用户可以给已订阅 channel 发送。
-- 管理员可以给任意用户、channel 或 broadcast 发送。
-- 瞬时消息只能发给可登录用户；普通用户只能发给自己，管理员可以发给任意可登录用户。
+## 10. 断线重连
 
-## HTTP 消息接口
+断线后，SDK 会按指数退避尝试重连，并在每次重连前重新调用：
 
-HTTP 消息接口也使用 bytes body，但 JSON 中以 base64 表示。
-
-写消息示例：
-
-```bash
-curl -sS -X POST http://127.0.0.1:8080/nodes/4096/users/1025/messages \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -d '{"body":"/wBwYXlsb2Fk"}'
+```go
+LoadSeenMessages()
 ```
 
-其中 `/wBwYXlsb2Fk` 是字节 `ff 00 70 61 79 6c 6f 61 64` 的 base64。
+业务侧要保证：
 
-发送目标用户瞬时包示例：
+1. `SaveCursor()` 只有在消息已经安全落库后才写入
+2. `LoadSeenMessages()` 能读出全部已持久化游标
+3. 游标可以覆盖多个生产节点
 
-```bash
-curl -sS -X POST http://127.0.0.1:8080/nodes/8192/users/1025/messages \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "body":"/wBwYXlsb2Fk",
-    "delivery_kind":"transient",
-    "delivery_mode":"route_retry"
-  }'
-```
-
-该接口返回 `202 Accepted`。如果目标节点不可达、短时无法寻路或目标用户离线，瞬时包仍可能最终被丢弃。
-
-查询消息示例：
-
-```bash
-curl -sS -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  'http://127.0.0.1:8080/nodes/4096/users/1025/messages?limit=20'
-```
-
-响应里的 `body` 同样是 base64 字符串。
-
-## 断线重连
-
-客户端断线后：
-
-1. 保留本地已持久化消息和游标。
-2. 使用指数退避重连 `GET /ws/client`。
-3. 第一帧重新发送 `LoginRequest`。
-4. 把本地游标表中的 `(node_id, seq)` 放入 `seen_messages`。
-5. 对重连后收到的所有消息继续按 `(node_id, seq)` 幂等处理。
-
-注意：瞬时包不参与上述恢复流程。若业务需要断线恢复，应在应用层自行持久化。
-
-示例：
+重连首帧示例：
 
 ```protobuf
 ClientEnvelope {
   login: LoginRequest {
-    node_id: 4096
-    user_id: 1025
-    password: "alice-password"
+    user: { node_id: 4096, user_id: 1025 }
+    password: "$2a$10$..."
     seen_messages: [
       { node_id: 4096, seq: 1 },
       { node_id: 4096, seq: 2 },
@@ -331,90 +315,88 @@ ClientEnvelope {
 }
 ```
 
-`seen_messages` 可以包含来自多个生产节点的消息游标。
+`seen_messages` 可以包含多个节点的游标；服务端会据此跳过这些已经持久化的消息。
 
-## Channel 与 Broadcast 流程
+## 11. HTTP 与 WebSocket 的职责分工
 
-channel：
+推荐把两条能力线按下面方式组合：
 
-1. 管理员创建 `role=channel` 用户。
-2. 普通用户订阅该 channel。
-3. 普通用户或管理员向 channel 地址发消息。
-4. 订阅者通过 WebSocket 收到订阅时间之后的 channel 消息。
+| 任务 | 推荐入口 |
+| --- | --- |
+| 获取管理员 token | `Client.Login()` 或 `HTTPClient.Login()` |
+| 创建用户 / channel | `HTTPClient.CreateUser()` 或 `Client.CreateUser()` |
+| 建立普通订阅 | `HTTPClient.CreateSubscription()` 或 `Client.SubscribeChannel()` |
+| 拉取历史消息 | `HTTPClient.ListMessages()` 或 `Client.WSListMessages()` |
+| 实时收消息 | `Client` |
+| 查询在线 session | `Client.ResolveUserSessions()` |
+| 发定向瞬时包 | `Client.SendPacketToSession()` |
 
-broadcast：
+补充说明：
 
-1. 每个节点启动时会创建系统 broadcast 地址，通常是 `user_id = 2`。
-2. 管理员可以向任意 broadcast 地址发送消息。
-3. 普通用户读取或连接 WebSocket 时，会看到仍在本地消息窗口内的 broadcast 消息。
+- `Client` 上部分带 `token` 的方法目前为了兼容旧签名仍然保留参数，但实际走的是已登录 WebSocket RPC。
+- `HTTPClient` 当前不负责在线 session 解析，也不负责任何实时推送。
 
-瞬时包：
+## 12. 错误处理建议
 
-1. 客户端直接把消息发给最终目标用户。
-2. 服务端按动态路由把瞬时包转发到目标节点。
-3. 只有目标用户当前在线时才能收到 `PacketPushed`。
-4. 如果需要把瞬时包只投递给某一个连接，先调用 `resolve_user_sessions`，再选定 `SessionRef` 填进 `target_session`。
-4. 瞬时包不落库，也不会在后续登录时补发。
+### 12.1 请求调用
 
-## 错误处理
+对同步调用，优先按错误类型判断：
 
-服务端错误统一使用 `ServerEnvelope.error`：
-
-```protobuf
-ServerEnvelope {
-  error: Error {
-    code: "forbidden"
-    message: "forbidden"
-    request_id: 42
-  }
+```go
+var serverErr *turntf.ServerError
+switch {
+case errors.As(err, &serverErr):
+	log.Printf("server error: code=%s request=%d", serverErr.Code, serverErr.RequestID)
+case errors.Is(err, turntf.ErrDisconnected):
+	log.Printf("websocket disconnected")
+case errors.Is(err, turntf.ErrClosed):
+	log.Printf("client already closed")
+default:
+	log.Printf("request failed: %v", err)
 }
 ```
 
-客户端建议：
+### 12.2 被动回调
 
-- `unauthorized`：停止自动重试，提示用户重新输入密码或重新获取账号信息。
-- `invalid_request`：检查客户端构造的 protobuf 字段，通常是目标缺失、正文为空或参数非法。
-- `invalid_request` 也包括 `delivery_kind` 非法、给不可登录目标发送瞬时消息，或在持久化消息中错误携带 `delivery_mode`。
-- `forbidden`：提示没有权限，必要时刷新订阅关系或联系管理员。
-- `not_found`：目标用户、channel 或 broadcast 地址不存在。
-- `internal_error`：保留连接并稍后重试；如果连接断开，按断线重连流程处理。
+`Handler` 里的两个回调要重点监控：
 
-登录阶段的错误会导致服务端关闭连接。登录成功后的请求级错误通常不会关闭连接。
+- `OnError()`：协议错误、持久化错误、重连中的读写错误都会从这里暴露
+- `OnDisconnect()`：每次连接断开都会触发
 
-## 跨节点连接
+登录阶段若收到 `unauthorized`，当前实现会停止自动重连。
 
-集群中任意节点都可以提供 `GET /ws/client`：
+## 13. 常见场景清单
 
-- 用户 token 只用于 HTTP；WebSocket 使用密码首帧登录。
-- 用户和消息通过集群复制最终一致。
-- 切换连接节点时，客户端仍按 `(node_id, seq)` 去重。
-- 不同节点在短时间内可能因为复制延迟或消息窗口裁剪而看到不同集合，稳定后会按集群规则收敛。
+### 13.1 普通用户实时收消息
 
-## 最小客户端状态机
+1. 管理员建用户
+2. 初始化 `CursorStore`
+3. `Connect()`
+4. 在 `OnMessage()` 里消费业务消息
 
-```text
-Disconnected
-  -> connect websocket
-Connecting
-  -> send LoginRequest(seen_messages)
-Authenticating
-  -> receive LoginResponse
-Online
-  -> receive MessagePushed: persist + cursor + optional ack
-  -> send SendMessageRequest: wait matching request_id response
-  -> receive Error: handle by code
-  -> socket closed: Disconnected with backoff
-```
+### 13.2 管理员查询在线连接并发瞬时包
 
-## 验收清单
+1. 管理员用户 `Connect()`
+2. `ResolveUserSessions()`
+3. 选择一个 `SessionRef`
+4. `SendPacketToSession()`
 
-- 能创建普通用户并记录 `(node_id, user_id)`。
-- 能用 WebSocket 第一帧登录成功。
-- 能接收历史补发消息。
-- 能接收实时消息。
-- 能发送非 UTF-8 `bytes body` 消息。
-- 能把 `(node_id, seq)` 持久化为本地游标。
-- 重连时能携带 `seen_messages` 并避免重复展示。
-- 能订阅 channel 并只收到订阅后的 channel 消息。
-- 能收到 broadcast 消息。
-- 能正确处理 `Error.code`。
+### 13.3 只做初始化脚本
+
+1. `HTTPClient.Login()`
+2. `CreateUser()` / `CreateChannel()`
+3. `CreateSubscription()`
+4. `PostMessage()`
+
+## 14. 验收清单
+
+- 能通过 `Connect()` 完成 WebSocket 首帧登录
+- `OnLogin()` 能拿到 `session_ref`
+- 能接收历史补发消息
+- 能接收实时 `MessagePushed`
+- 能接收实时 `PacketPushed`
+- 本地确实按 `SaveMessage -> SaveCursor -> AckMessage` 处理持久化消息
+- 重连后能带上 `seen_messages`，且不会重复展示已落库消息
+- 能通过 `ResolveUserSessions()` + `SendPacketToSession()` 做会话定向 packet
+- 能区分 `ServerError`、`ConnectionError`、`ErrDisconnected`
+- 修改 proto 后知道去 `go generate ./...` 重新生成并同步检查文档
