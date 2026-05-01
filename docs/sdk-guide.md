@@ -44,6 +44,8 @@
 注意：
 
 - `Client.Login()` 本质上只是 `HTTP /auth/login` 的便捷封装。
+- `Config.Credentials` 和 `Client.Login()` / `client.HTTP().Login()` 都支持两种登录选择器：`(NodeID, UserID)` 或 `LoginName`。
+- `username` 不参与认证，`login_name` 才是新增的登录名前解析字段。
 - `Client` 上部分方法保留了 `token string` 参数，但当前实现实际走已登录 WebSocket RPC，`token` 参数不会参与鉴权。
 
 ## 3. `Config` 配置项
@@ -53,7 +55,7 @@
 | 字段 | 作用 | 默认行为 |
 | --- | --- | --- |
 | `BaseURL` | 传 `http://host:port` 或 `https://host:port`，SDK 自动拼接 WebSocket 路径 | 必填 |
-| `Credentials` | WebSocket 首帧登录身份，包含 `NodeID`、`UserID`、`Password` | 必填 |
+| `Credentials` | WebSocket 首帧登录身份，二选一包含 `(NodeID, UserID)` 或 `LoginName`，再加 `Password` | 必填 |
 | `CursorStore` | 本地消息和游标持久层接缝 | 默认为 `MemoryCursorStore` |
 | `Handler` | 生命周期和推送回调 | 默认为 `NopHandler` |
 | `HTTPClient` | 自定义底层 `*http.Client`，同时用于 HTTP 与 WebSocket Dial | 默认 `http.DefaultClient` |

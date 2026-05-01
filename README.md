@@ -47,6 +47,8 @@ go get github.com/tursom/turntf-go
 
 - `Client.Connect()` 只依赖 `Config.Credentials` 做 WebSocket 首帧登录，不需要 HTTP token。
 - `Client.Login()` 只是复用内置 `HTTPClient` 调用 `/auth/login`，便于你在同一个对象上顺手拿管理员 Bearer token。
+- WebSocket 和 HTTP 登录都同时支持两种选择器：旧的 `node_id + user_id + password`，以及新的 `login_name + password`。
+- `username` 仍然只是用户资料字段，不参与认证；认证前的解析只看 `node_id/user_id` 或 `login_name`。
 - `Client` 上保留了部分带 `token string` 参数的方法名以兼容旧调用方式，但这些方法当前实际走已登录 WebSocket RPC，`token` 参数不会参与鉴权。
 
 ## 快速开始
@@ -98,6 +100,7 @@ func main() {
 			NodeID:   4096,
 			UserID:   1025,
 			Password: turntf.MustPlainPassword("alice-password"),
+			// 或者使用 LoginName: "alice.login",
 		},
 		CursorStore:           turntf.NewMemoryCursorStore(),
 		Handler:               handler{},
@@ -151,10 +154,12 @@ func main() {
 ```go
 httpClient := turntf.NewHTTPClient("http://127.0.0.1:8080")
 token, err := httpClient.Login(ctx, 4096, 1, "root")
+// 也可以使用 httpClient.LoginByLoginName(ctx, "alice.login", "alice-password")
 user, err := httpClient.CreateUser(ctx, token, turntf.CreateUserRequest{
-	Username: "alice",
-	Password: turntf.MustPlainPassword("alice-password"),
-	Role:     "user",
+	Username:  "alice",
+	LoginName: "alice.login",
+	Password:  turntf.MustPlainPassword("alice-password"),
+	Role:      "user",
 })
 message, err := httpClient.PostMessage(ctx, token, turntf.UserRef{
 	NodeID: user.NodeID,
@@ -185,7 +190,7 @@ message, err := httpClient.PostMessage(ctx, token, turntf.UserRef{
 
 HTTP `HTTPClient`：
 
-- 登录：`Login`、`LoginWithPassword`
+- 登录：`Login`、`LoginWithPassword`、`LoginByLoginName`、`LoginByLoginNameWithPassword`
 - 用户：`CreateUser`、`CreateChannel`
 - 消息：`ListMessages`、`PostMessage`、`PostPacket`
 - 集群：`ListClusterNodes`、`ListNodeLoggedInUsers`

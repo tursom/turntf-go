@@ -120,13 +120,14 @@ type Config struct {
 
 ```go
 type Credentials struct {
-    NodeID   int64
-    UserID   int64
-    Password PasswordInput
+    NodeID    int64
+    UserID    int64
+    LoginName string
+    Password  PasswordInput
 }
 ```
 
-WebSocket 首帧登录的身份凭证。`NodeID` 和 `UserID` 均不能为 0，`Password` 通过 `MustPlainPassword()` 或 `HashedPassword()` 构造。
+WebSocket 首帧登录的身份凭证。必须二选一提供 `(NodeID, UserID)` 或 `LoginName`，`Password` 通过 `MustPlainPassword()` 或 `HashedPassword()` 构造。
 
 ---
 
@@ -264,6 +265,7 @@ type User struct {
     NodeID         int64  `json:"node_id"`
     UserID         int64  `json:"user_id"`
     Username       string `json:"username"`
+    LoginName      string `json:"login_name"`
     Role           string `json:"role"`
     ProfileJSON    []byte `json:"profile_json,omitempty"`
     SystemReserved bool   `json:"system_reserved"`
@@ -273,7 +275,7 @@ type User struct {
 }
 ```
 
-用户实体。`Role` 可为 `"user"`、`"channel"`、`"admin"` 等。
+用户实体。`Role` 可为 `"user"`、`"channel"`、`"admin"` 等。`LoginName` 是登录前解析使用的认证名；`Username` 仍然只是资料字段。
 
 ### `Subscription`
 
@@ -339,6 +341,7 @@ const (
 ```go
 type CreateUserRequest struct {
     Username    string        `json:"username"`
+    LoginName   string        `json:"login_name,omitempty"`
     Password    PasswordInput `json:"password,omitempty"`
     ProfileJSON []byte        `json:"profile_json,omitempty"`
     Role        string        `json:"role"`
@@ -350,13 +353,14 @@ type CreateUserRequest struct {
 ```go
 type UpdateUserRequest struct {
     Username    *string        `json:"username,omitempty"`
+    LoginName   *string        `json:"login_name,omitempty"`
     Password    *PasswordInput `json:"password,omitempty"`
     ProfileJSON *[]byte        `json:"profile_json,omitempty"`
     Role        *string        `json:"role,omitempty"`
 }
 ```
 
-使用指针字段表示可选更新，传 `nil` 表示不修改该字段。
+使用指针字段表示可选更新，传 `nil` 表示不修改该字段。`LoginName` 显式传空串会触发解绑。
 
 ---
 
@@ -452,9 +456,10 @@ type ClusterNode struct {
 
 ```go
 type LoggedInUser struct {
-    NodeID   int64  `json:"node_id"`
-    UserID   int64  `json:"user_id"`
-    Username string `json:"username"`
+    NodeID    int64  `json:"node_id"`
+    UserID    int64  `json:"user_id"`
+    Username  string `json:"username"`
+    LoginName string `json:"login_name"`
 }
 ```
 

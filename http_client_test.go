@@ -55,11 +55,15 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		if _, ok := req["profile_json"]; ok {
 			t.Fatal("did not expect legacy profile_json field in create user request")
 		}
+		if got := req["login_name"]; got != "alice.login" {
+			t.Fatalf("unexpected login_name in create user request: %#v", got)
+		}
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
 			"node_id":    4096,
 			"user_id":    1025,
 			"username":   req["username"],
+			"login_name": req["login_name"],
 			"role":       req["role"],
 			"profile":    map[string]any{"tier": "gold"},
 			"created_at": "hlc-created",
@@ -160,8 +164,8 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"target_node_id": 4096,
 			"items": []LoggedInUser{
-				{NodeID: 4096, UserID: 1025, Username: "alice"},
-				{NodeID: 4096, UserID: 1026, Username: "bob"},
+				{NodeID: 4096, UserID: 1025, Username: "alice", LoginName: "alice.login"},
+				{NodeID: 4096, UserID: 1026, Username: "bob", LoginName: "bob.login"},
 			},
 			"count": 2,
 		})
@@ -248,6 +252,7 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 
 	user, err := client.CreateUser(ctx, token, CreateUserRequest{
 		Username:    "alice",
+		LoginName:   "alice.login",
 		Password:    MustPlainPassword("alice-password"),
 		ProfileJSON: []byte(`{"tier":"gold"}`),
 		Role:        "user",
@@ -260,6 +265,9 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 	}
 	if string(user.ProfileJSON) != `{"tier":"gold"}` {
 		t.Fatalf("unexpected profile json: %s", user.ProfileJSON)
+	}
+	if user.LoginName != "alice.login" {
+		t.Fatalf("unexpected user login_name: %+v", user)
 	}
 
 	if err := client.CreateSubscription(ctx, token, UserRef{NodeID: 4096, UserID: 1025}, UserRef{NodeID: 4096, UserID: 1026}); err != nil {
@@ -301,7 +309,7 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListNodeLoggedInUsers: %v", err)
 	}
-	if len(users) != 2 || users[0].Username != "alice" || users[1].UserID != 1026 {
+	if len(users) != 2 || users[0].Username != "alice" || users[0].LoginName != "alice.login" || users[1].UserID != 1026 || users[1].LoginName != "bob.login" {
 		t.Fatalf("unexpected logged-in users: %+v", users)
 	}
 
@@ -335,6 +343,42 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 	}
 	if unblocked.DeletedAt == "" {
 		t.Fatalf("expected deleted_at in unblock response: %+v", unblocked)
+	}
+}
+
+func TestHTTPClientLoginByLoginName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode login request: %v", err)
+		}
+		if _, ok := req["node_id"]; ok {
+			t.Fatalf("did not expect node_id in login_name login request: %#v", req)
+		}
+		if _, ok := req["user_id"]; ok {
+			t.Fatalf("did not expect user_id in login_name login request: %#v", req)
+		}
+		if got := req["login_name"]; got != "alice.login" {
+			t.Fatalf("unexpected login_name: %#v", got)
+		}
+		password, _ := req["password"].(string)
+		if password == "alice-password" {
+			t.Fatal("expected hashed login password")
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(password), []byte("alice-password")); err != nil {
+			t.Fatalf("expected bcrypt password, got %v", err)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"token": "login-name-token"})
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL)
+	token, err := client.LoginByLoginName(context.Background(), "alice.login", "alice-password")
+	if err != nil {
+		t.Fatalf("LoginByLoginName: %v", err)
+	}
+	if token != "login-name-token" {
+		t.Fatalf("unexpected token: %q", token)
 	}
 }
 
@@ -520,7 +564,7 @@ func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
-					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
+					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", LoginName: "alice.login", Role: "user"},
 					ProtocolVersion: "client-v1alpha1",
 				},
 			},
@@ -529,6 +573,9 @@ func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 		createReq := mustReadClientEnvelope(t, conn)
 		if createReq.GetCreateUser().Username != "alice" {
 			t.Fatalf("unexpected create user request: %+v", createReq.GetCreateUser())
+		}
+		if createReq.GetCreateUser().GetLoginName() != "alice.login" {
+			t.Fatalf("unexpected create user login_name: %+v", createReq.GetCreateUser())
 		}
 		if createReq.GetCreateUser().Password == "alice-password" {
 			t.Fatal("expected ws create user password to be hashed")
@@ -541,10 +588,11 @@ func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 				CreateUserResponse: &pb.CreateUserResponse{
 					RequestId: createReq.GetCreateUser().RequestId,
 					User: &pb.User{
-						NodeId:   4096,
-						UserId:   1025,
-						Username: "alice",
-						Role:     "user",
+						NodeId:    4096,
+						UserId:    1025,
+						Username:  "alice",
+						LoginName: "alice.login",
+						Role:      "user",
 					},
 				},
 			},
@@ -579,14 +627,15 @@ func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 	}
 
 	user, err := client.CreateUser(ctx, token, CreateUserRequest{
-		Username: "alice",
-		Password: MustPlainPassword("alice-password"),
-		Role:     "user",
+		Username:  "alice",
+		LoginName: "alice.login",
+		Password:  MustPlainPassword("alice-password"),
+		Role:      "user",
 	})
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	if user.Username != "alice" {
+	if user.Username != "alice" || user.LoginName != "alice.login" {
 		t.Fatalf("unexpected user: %+v", user)
 	}
 	if client.HTTP() == nil {

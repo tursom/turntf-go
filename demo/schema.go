@@ -98,9 +98,10 @@ type SessionSpec struct {
 }
 
 type UserCredential struct {
-	NodeID   int64         `yaml:"node_id"`
-	UserID   int64         `yaml:"user_id"`
-	Password PasswordValue `yaml:"password"`
+	NodeID    int64         `yaml:"node_id"`
+	UserID    int64         `yaml:"user_id"`
+	LoginName string        `yaml:"login_name"`
+	Password  PasswordValue `yaml:"password"`
 }
 
 type PasswordValue struct {
@@ -222,8 +223,14 @@ func (s *Scenario) Validate() error {
 		if _, ok := s.Nodes[session.Node]; !ok {
 			return fmt.Errorf("sessions.%s.node references unknown node %q", name, session.Node)
 		}
-		if session.User.NodeID == 0 || session.User.UserID == 0 {
-			return fmt.Errorf("sessions.%s.user requires node_id, user_id, password", name)
+		loginName := strings.TrimSpace(session.User.LoginName)
+		hasIDSelector := session.User.NodeID != 0 || session.User.UserID != 0
+		hasLoginNameSelector := loginName != ""
+		if hasIDSelector == hasLoginNameSelector {
+			return fmt.Errorf("sessions.%s.user requires exactly one of (node_id,user_id) or login_name, plus password", name)
+		}
+		if hasIDSelector && (session.User.NodeID == 0 || session.User.UserID == 0) {
+			return fmt.Errorf("sessions.%s.user requires both node_id and user_id when using ID login", name)
 		}
 		if err := session.User.Password.Validate(); err != nil {
 			return fmt.Errorf("sessions.%s.user.password: %w", name, err)

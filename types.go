@@ -9,9 +9,10 @@ import (
 )
 
 type Credentials struct {
-	NodeID   int64
-	UserID   int64
-	Password PasswordInput
+	NodeID    int64
+	UserID    int64
+	LoginName string
+	Password  PasswordInput
 }
 
 type UserRef struct {
@@ -28,6 +29,7 @@ type User struct {
 	NodeID         int64  `json:"node_id"`
 	UserID         int64  `json:"user_id"`
 	Username       string `json:"username"`
+	LoginName      string `json:"login_name"`
 	Role           string `json:"role"`
 	ProfileJSON    []byte `json:"profile_json,omitempty"`
 	SystemReserved bool   `json:"system_reserved"`
@@ -164,9 +166,10 @@ type ClusterNode struct {
 }
 
 type LoggedInUser struct {
-	NodeID   int64  `json:"node_id"`
-	UserID   int64  `json:"user_id"`
-	Username string `json:"username"`
+	NodeID    int64  `json:"node_id"`
+	UserID    int64  `json:"user_id"`
+	Username  string `json:"username"`
+	LoginName string `json:"login_name"`
 }
 
 type OnlineNodePresence struct {
@@ -268,6 +271,7 @@ type SendPacketInput struct {
 
 type CreateUserRequest struct {
 	Username    string        `json:"username"`
+	LoginName   string        `json:"login_name,omitempty"`
 	Password    PasswordInput `json:"password,omitempty"`
 	ProfileJSON []byte        `json:"profile_json,omitempty"`
 	Role        string        `json:"role"`
@@ -275,6 +279,7 @@ type CreateUserRequest struct {
 
 type UpdateUserRequest struct {
 	Username    *string        `json:"username,omitempty"`
+	LoginName   *string        `json:"login_name,omitempty"`
 	Password    *PasswordInput `json:"password,omitempty"`
 	ProfileJSON *[]byte        `json:"profile_json,omitempty"`
 	Role        *string        `json:"role,omitempty"`
@@ -282,6 +287,41 @@ type UpdateUserRequest struct {
 
 func (m Message) Cursor() MessageCursor {
 	return MessageCursor{NodeID: m.NodeID, Seq: m.Seq}
+}
+
+func normalizeLoginName(value string) string {
+	return strings.TrimSpace(value)
+}
+
+func validateLoginSelector(nodeID, userID int64, loginName string) (string, error) {
+	normalized := normalizeLoginName(loginName)
+	hasIDSelector := nodeID != 0 || userID != 0
+	hasLoginNameSelector := normalized != ""
+	if hasIDSelector == hasLoginNameSelector {
+		return "", fmt.Errorf("exactly one of (node_id,user_id) or login_name is required")
+	}
+	if hasIDSelector && (nodeID == 0 || userID == 0) {
+		return "", fmt.Errorf("both node_id and user_id are required")
+	}
+	return normalized, nil
+}
+
+func (c Credentials) validate() error {
+	if _, err := validateLoginSelector(c.NodeID, c.UserID, c.LoginName); err != nil {
+		return err
+	}
+	if err := c.Password.Validate(); err != nil {
+		return fmt.Errorf("invalid password: %w", err)
+	}
+	return nil
+}
+
+func (c Credentials) loginSelector() (*pb.UserRef, string) {
+	loginName := normalizeLoginName(c.LoginName)
+	if loginName != "" {
+		return nil, loginName
+	}
+	return userRefToProto(UserRef{NodeID: c.NodeID, UserID: c.UserID}), ""
 }
 
 func (p UserMetadataPage) HasMore() bool {
@@ -431,6 +471,7 @@ func userFromProto(in *pb.User) User {
 		NodeID:         in.NodeId,
 		UserID:         in.UserId,
 		Username:       in.Username,
+		LoginName:      in.LoginName,
 		Role:           in.Role,
 		ProfileJSON:    append([]byte(nil), in.ProfileJson...),
 		SystemReserved: in.SystemReserved,
@@ -628,9 +669,10 @@ func loggedInUserFromProto(in *pb.LoggedInUser) LoggedInUser {
 		return LoggedInUser{}
 	}
 	return LoggedInUser{
-		NodeID:   in.NodeId,
-		UserID:   in.UserId,
-		Username: in.Username,
+		NodeID:    in.NodeId,
+		UserID:    in.UserId,
+		Username:  in.Username,
+		LoginName: in.LoginName,
 	}
 }
 

@@ -89,7 +89,12 @@ message ServerEnvelope {
 
 ### 首帧格式
 
-当前 proto 中，登录身份放在嵌套的 `user` 字段里，而不是旧版本文档中的顶层 `node_id` / `user_id`：
+当前 proto 中，登录身份有两种二选一写法：
+
+- 旧式 `(node_id, user_id)`：放在嵌套的 `user` 字段里
+- 新式 `login_name`：直接写 `LoginRequest.login_name`
+
+示例一，按 `(node_id, user_id)` 登录：
 
 ```protobuf
 ClientEnvelope {
@@ -105,9 +110,23 @@ ClientEnvelope {
 }
 ```
 
+示例二，按 `login_name` 登录：
+
+```protobuf
+ClientEnvelope {
+  login: LoginRequest {
+    login_name: "alice.login"
+    password: "$2a$10$..."
+    seen_messages: []
+    transient_only: false
+  }
+}
+```
+
 字段说明：
 
-- `user`：当前登录用户身份
+- `user`：旧式登录身份选择器，和 `login_name` 二选一
+- `login_name`：新增登录名选择器，和 `user` 二选一
 - `password`：密码哈希。`turntf-go` 的 `MustPlainPassword` / `PlainPassword` 会先做 bcrypt，再把哈希串写到线上请求
 - `seen_messages`：客户端已经安全持久化的消息游标集合
 - `transient_only`：为 `true` 时跳过持久化消息补发和后续持久化消息推送，但仍可接收瞬时包
@@ -121,6 +140,7 @@ ServerEnvelope {
       node_id: 4096
       user_id: 1025
       username: "alice"
+      login_name: "alice.login"
       role: "user"
     }
     protocol_version: "client-v1alpha1"

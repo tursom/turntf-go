@@ -22,9 +22,10 @@ func NewHTTPClient(baseURL string) *HTTPClient {
 }
 
 type httpLoginRequest struct {
-	NodeID   int64  `json:"node_id"`
-	UserID   int64  `json:"user_id"`
-	Password string `json:"password"`
+	NodeID    int64  `json:"node_id,omitempty"`
+	UserID    int64  `json:"user_id,omitempty"`
+	LoginName string `json:"login_name,omitempty"`
+	Password  string `json:"password"`
 }
 
 type httpLoginResponse struct {
@@ -42,16 +43,18 @@ type httpMessageRequest struct {
 }
 
 type httpCreateUserRequest struct {
-	Username string          `json:"username"`
-	Password string          `json:"password,omitempty"`
-	Profile  json.RawMessage `json:"profile,omitempty"`
-	Role     string          `json:"role"`
+	Username  string          `json:"username"`
+	LoginName string          `json:"login_name,omitempty"`
+	Password  string          `json:"password,omitempty"`
+	Profile   json.RawMessage `json:"profile,omitempty"`
+	Role      string          `json:"role"`
 }
 
 type httpUserResponse struct {
 	NodeID         int64           `json:"node_id"`
 	UserID         int64           `json:"user_id"`
 	Username       string          `json:"username"`
+	LoginName      string          `json:"login_name"`
 	Role           string          `json:"role"`
 	Profile        json.RawMessage `json:"profile,omitempty"`
 	ProfileJSON    json.RawMessage `json:"profile_json,omitempty"`
@@ -139,15 +142,33 @@ func (c *HTTPClient) Login(ctx context.Context, nodeID, userID int64, password s
 }
 
 func (c *HTTPClient) LoginWithPassword(ctx context.Context, nodeID, userID int64, password PasswordInput) (string, error) {
+	return c.loginWithRequest(ctx, httpLoginRequest{NodeID: nodeID, UserID: userID}, password)
+}
+
+func (c *HTTPClient) LoginByLoginName(ctx context.Context, loginName, password string) (string, error) {
+	input, err := PlainPassword(password)
+	if err != nil {
+		return "", err
+	}
+	return c.LoginByLoginNameWithPassword(ctx, loginName, input)
+}
+
+func (c *HTTPClient) LoginByLoginNameWithPassword(ctx context.Context, loginName string, password PasswordInput) (string, error) {
+	return c.loginWithRequest(ctx, httpLoginRequest{LoginName: loginName}, password)
+}
+
+func (c *HTTPClient) loginWithRequest(ctx context.Context, req httpLoginRequest, password PasswordInput) (string, error) {
 	var resp httpLoginResponse
+	normalizedLoginName, err := validateLoginSelector(req.NodeID, req.UserID, req.LoginName)
+	if err != nil {
+		return "", err
+	}
 	if err := password.Validate(); err != nil {
 		return "", fmt.Errorf("invalid password: %w", err)
 	}
-	err := c.doJSON(ctx, http.MethodPost, "/auth/login", "", httpLoginRequest{
-		NodeID:   nodeID,
-		UserID:   userID,
-		Password: password.WireValue(),
-	}, &resp, http.StatusOK)
+	req.LoginName = normalizedLoginName
+	req.Password = password.WireValue()
+	err = c.doJSON(ctx, http.MethodPost, "/auth/login", "", req, &resp, http.StatusOK)
 	if err != nil {
 		return "", err
 	}
@@ -166,10 +187,11 @@ func (c *HTTPClient) CreateUser(ctx context.Context, token string, req CreateUse
 		return User{}, fmt.Errorf("role is required")
 	}
 	err := c.doJSON(ctx, http.MethodPost, "/users", token, httpCreateUserRequest{
-		Username: req.Username,
-		Password: req.Password.WireValue(),
-		Profile:  json.RawMessage(req.ProfileJSON),
-		Role:     req.Role,
+		Username:  req.Username,
+		LoginName: req.LoginName,
+		Password:  req.Password.WireValue(),
+		Profile:   json.RawMessage(req.ProfileJSON),
+		Role:      req.Role,
 	}, &resp, http.StatusCreated, http.StatusOK)
 	if err != nil {
 		return User{}, err
@@ -503,6 +525,7 @@ func userFromHTTP(in httpUserResponse) User {
 		NodeID:         in.NodeID,
 		UserID:         in.UserID,
 		Username:       in.Username,
+		LoginName:      in.LoginName,
 		Role:           in.Role,
 		ProfileJSON:    append([]byte(nil), profile...),
 		SystemReserved: in.SystemReserved,

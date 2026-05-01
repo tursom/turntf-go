@@ -112,10 +112,11 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User: &pb.User{
-						NodeId:   4096,
-						UserId:   1025,
-						Username: "alice",
-						Role:     "user",
+						NodeId:    4096,
+						UserId:    1025,
+						Username:  "alice",
+						LoginName: "alice.login",
+						Role:      "user",
 					},
 					ProtocolVersion: "client-v1alpha1",
 					SessionRef:      &pb.SessionRef{ServingNodeId: 4096, SessionId: "session-a"},
@@ -196,6 +197,9 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 	if loginInfo.SessionRef != (SessionRef{ServingNodeID: 4096, SessionID: "session-a"}) {
 		t.Fatalf("unexpected current session ref: %+v", loginInfo.SessionRef)
 	}
+	if loginInfo.User.LoginName != "alice.login" {
+		t.Fatalf("unexpected current login user: %+v", loginInfo.User)
+	}
 
 	select {
 	case cursor := <-acked:
@@ -237,6 +241,9 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 	}
 	if handler.logins[0].SessionRef != (SessionRef{ServingNodeID: 4096, SessionID: "session-a"}) {
 		t.Fatalf("unexpected login callback session ref: %+v", handler.logins[0].SessionRef)
+	}
+	if handler.logins[0].User.LoginName != "alice.login" {
+		t.Fatalf("unexpected login callback user: %+v", handler.logins[0].User)
 	}
 	if len(handler.messages) != 1 {
 		t.Fatalf("expected 1 pushed message, got %d", len(handler.messages))
@@ -593,8 +600,8 @@ func TestClientListClusterQueries(t *testing.T) {
 					RequestId:    usersReq.GetListNodeLoggedInUsers().GetRequestId(),
 					TargetNodeId: 4096,
 					Items: []*pb.LoggedInUser{
-						{NodeId: 4096, UserId: 1025, Username: "alice"},
-						{NodeId: 4096, UserId: 1026, Username: "bob"},
+						{NodeId: 4096, UserId: 1025, Username: "alice", LoginName: "alice.login"},
+						{NodeId: 4096, UserId: 1026, Username: "bob", LoginName: "bob.login"},
 					},
 					Count: 2,
 				},
@@ -643,7 +650,7 @@ func TestClientListClusterQueries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListNodeLoggedInUsers: %v", err)
 	}
-	if len(users) != 2 || users[0].Username != "alice" || users[1].UserID != 1026 {
+	if len(users) != 2 || users[0].Username != "alice" || users[0].LoginName != "alice.login" || users[1].UserID != 1026 || users[1].LoginName != "bob.login" {
 		t.Fatalf("unexpected logged-in users: %+v", users)
 	}
 
@@ -1148,6 +1155,68 @@ func TestClientUsesProvidedHashedPasswordForWSLogin(t *testing.T) {
 	}
 }
 
+func TestClientCanConnectWithLoginNameSelector(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		login := mustReadClientEnvelope(t, conn)
+		if login.GetLogin().GetUser() != nil {
+			t.Fatalf("did not expect legacy user selector in login request: %+v", login.GetLogin())
+		}
+		if got := login.GetLogin().GetLoginName(); got != "alice.login" {
+			t.Fatalf("unexpected login_name selector: %q", got)
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(login.GetLogin().GetPassword()), []byte("alice-password")); err != nil {
+			t.Fatalf("expected bcrypt password, got %v", err)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User: &pb.User{
+						NodeId:    4096,
+						UserId:    1025,
+						Username:  "alice",
+						LoginName: "alice.login",
+						Role:      "user",
+					},
+					ProtocolVersion: "client-v1alpha1",
+					SessionRef:      &pb.SessionRef{ServingNodeId: 4096, SessionId: "session-login-name"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:      server.URL,
+		Credentials:  Credentials{LoginName: "alice.login", Password: MustPlainPassword("alice-password")},
+		PingInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	loginInfo, ok := client.CurrentLogin()
+	if !ok {
+		t.Fatal("expected current login info")
+	}
+	if loginInfo.User.LoginName != "alice.login" || loginInfo.SessionRef.SessionID != "session-login-name" {
+		t.Fatalf("unexpected login info: %+v", loginInfo)
+	}
+}
+
 func TestClientUpdateUserHashesPassword(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -1212,6 +1281,78 @@ func TestClientUpdateUserHashesPassword(t *testing.T) {
 		Password: &passwordInput,
 	}); err != nil {
 		t.Fatalf("UpdateUser: %v", err)
+	}
+}
+
+func TestClientUpdateUserCarriesLoginNameField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		_ = mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", LoginName: "alice.login", Role: "user"},
+					ProtocolVersion: "client-v1alpha1",
+				},
+			},
+		})
+
+		updateReq := mustReadClientEnvelope(t, conn)
+		loginNameField := updateReq.GetUpdateUser().GetLoginName()
+		if loginNameField == nil {
+			t.Fatal("expected login_name field in update request")
+		}
+		if loginNameField.GetValue() != "" {
+			t.Fatalf("expected empty login_name to preserve explicit unbind, got %+v", loginNameField)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_UpdateUserResponse{
+				UpdateUserResponse: &pb.UpdateUserResponse{
+					RequestId: updateReq.GetUpdateUser().GetRequestId(),
+					User: &pb.User{
+						NodeId:    4096,
+						UserId:    1025,
+						Username:  "alice",
+						LoginName: "",
+						Role:      "user",
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:      server.URL,
+		Credentials:  Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
+		PingInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	loginName := ""
+	user, err := client.UpdateUser(ctx, UserRef{NodeID: 4096, UserID: 1025}, UpdateUserRequest{
+		LoginName: &loginName,
+	})
+	if err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	if user.LoginName != "" {
+		t.Fatalf("expected cleared login_name in update response: %+v", user)
 	}
 }
 

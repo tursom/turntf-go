@@ -28,19 +28,21 @@
 ```go
 httpClient := turntf.NewHTTPClient("http://127.0.0.1:8080")
 token, err := httpClient.Login(ctx, 4096, 1, "root")
+// 也可以使用 httpClient.LoginByLoginName(ctx, "alice.login", "alice-password")
 ```
 
 ### 2.2 创建普通用户
 
 ```go
 alice, err := httpClient.CreateUser(ctx, token, turntf.CreateUserRequest{
-	Username: "alice",
-	Password: turntf.MustPlainPassword("alice-password"),
-	Role:     "user",
+	Username:  "alice",
+	LoginName: "alice.login",
+	Password:  turntf.MustPlainPassword("alice-password"),
+	Role:      "user",
 })
 ```
 
-响应中的 `(node_id, user_id)` 就是后续 WebSocket 登录身份。
+响应中的 `(node_id, user_id)` 和可选的 `login_name` 都可以作为后续 WebSocket 登录前的身份选择器。
 
 ### 2.3 创建 channel
 
@@ -109,6 +111,7 @@ client, err := turntf.NewClient(turntf.Config{
 		NodeID:   alice.NodeID,
 		UserID:   alice.UserID,
 		Password: turntf.MustPlainPassword("alice-password"),
+		// 或者改为 LoginName: "alice.login",
 	},
 	CursorStore:           store,
 	Handler:               myHandler{},
@@ -122,7 +125,7 @@ client, err := turntf.NewClient(turntf.Config{
 几个最关键的配置：
 
 - `BaseURL`：传 `http://` 或 `https://` 即可，SDK 会自动切成 `ws://` 或 `wss://`
-- `Credentials`：用于 WebSocket 首帧登录
+- `Credentials`：用于 WebSocket 首帧登录，二选一提供 `(node_id, user_id)` 或 `login_name`
 - `CursorStore`：决定 `seen_messages` 和本地恢复能力
 - `Handler`：接收登录、消息、packet、错误、断线回调
 

@@ -194,9 +194,10 @@ func (r *Runner) executeConnect(ctx context.Context, session *sessionRuntime, st
 	cfg := turntf.Config{
 		BaseURL: session.node.BaseURL,
 		Credentials: turntf.Credentials{
-			NodeID:   session.spec.User.NodeID,
-			UserID:   session.spec.User.UserID,
-			Password: session.spec.User.Password.PasswordInput,
+			NodeID:    session.spec.User.NodeID,
+			UserID:    session.spec.User.UserID,
+			LoginName: session.spec.User.LoginName,
+			Password:  session.spec.User.Password.PasswordInput,
 		},
 		CursorStore:           session.store,
 		Handler:               handler,
@@ -752,6 +753,10 @@ func parseCreateUser(values map[string]any) (turntf.CreateUserRequest, error) {
 	if err != nil {
 		return turntf.CreateUserRequest{}, err
 	}
+	loginName, err := stringField(values, "login_name", false)
+	if err != nil {
+		return turntf.CreateUserRequest{}, err
+	}
 	role, err := stringField(values, "role", true)
 	if err != nil {
 		return turntf.CreateUserRequest{}, err
@@ -769,6 +774,7 @@ func parseCreateUser(values map[string]any) (turntf.CreateUserRequest, error) {
 	}
 	return turntf.CreateUserRequest{
 		Username:    username,
+		LoginName:   loginName,
 		Password:    password,
 		Role:        role,
 		ProfileJSON: profile,
@@ -787,6 +793,13 @@ func parseUpdateUser(values map[string]any) (turntf.UserRef, turntf.UpdateUserRe
 			return turntf.UserRef{}, turntf.UpdateUserRequest{}, fmt.Errorf("username: %w", err)
 		}
 		req.Username = &value
+	}
+	if raw, ok := values["login_name"]; ok {
+		value, err := stringValue(raw)
+		if err != nil {
+			return turntf.UserRef{}, turntf.UpdateUserRequest{}, fmt.Errorf("login_name: %w", err)
+		}
+		req.LoginName = &value
 	}
 	if raw, ok := values["password"]; ok {
 		value, err := parsePasswordValue(raw)

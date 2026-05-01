@@ -45,6 +45,12 @@ token, err := httpClient.Login(ctx, 4096, 1, "root")
 - `userID`：用户 ID
 - `password`：明文密码，SDK 内部自动做 bcrypt 哈希
 
+也可以直接按登录名登录：
+
+```go
+token, err := httpClient.LoginByLoginName(ctx, "alice.login", "alice-password")
+```
+
 ### 使用 PasswordInput
 
 ```go
@@ -53,6 +59,9 @@ token, err := httpClient.LoginWithPassword(ctx, 4096, 1, turntf.MustPlainPasswor
 
 // 方式二：已有 bcrypt 哈希串
 token, err := httpClient.LoginWithPassword(ctx, 4096, 1, turntf.HashedPassword("$2a$10$..."))
+
+// 登录名 + PasswordInput
+token, err := httpClient.LoginByLoginNameWithPassword(ctx, "alice.login", turntf.MustPlainPassword("alice-password"))
 ```
 
 返回的 `token` 是 Bearer token，后续所有管理接口都需携带。
@@ -63,9 +72,10 @@ token, err := httpClient.LoginWithPassword(ctx, 4096, 1, turntf.HashedPassword("
 
 ```go
 alice, err := httpClient.CreateUser(ctx, token, turntf.CreateUserRequest{
-    Username: "alice",
-    Password: turntf.MustPlainPassword("alice-password"),
-    Role:     "user",
+    Username:  "alice",
+    LoginName: "alice.login",
+    Password:  turntf.MustPlainPassword("alice-password"),
+    Role:      "user",
 })
 ```
 
@@ -74,11 +84,12 @@ alice, err := httpClient.CreateUser(ctx, token, turntf.CreateUserRequest{
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `Username` | 是 | 用户名 |
+| `LoginName` | 否 | 登录名前解析字段；为空表示不绑定 |
 | `Password` | 否 | 密码（channel 类型用户可省略） |
 | `ProfileJSON` | 否 | 用户资料 JSON 字节 |
 | `Role` | 是 | 角色：`"user"`、`"channel"`、`"admin"` |
 
-返回的 `User` 中包含 `NodeID` 和 `UserID`，这是后续 WebSocket 登录和消息发送所需的身份标识。
+返回的 `User` 中包含 `NodeID`、`UserID` 和 `LoginName`。其中 `(NodeID, UserID)` 与 `LoginName` 都可以作为后续登录前的身份选择器。
 
 ### 创建频道（Channel）
 
