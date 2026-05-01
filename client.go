@@ -234,6 +234,26 @@ func (c *Client) PostPacket(ctx context.Context, token string, targetNodeID int6
 	return err
 }
 
+func (c *Client) GetUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
+	_ = token
+	return c.WSGetUserMetadata(ctx, owner, key)
+}
+
+func (c *Client) UpsertUserMetadata(ctx context.Context, token string, owner UserRef, key string, req UpsertUserMetadataRequest) (UserMetadata, error) {
+	_ = token
+	return c.WSUpsertUserMetadata(ctx, owner, key, req)
+}
+
+func (c *Client) DeleteUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
+	_ = token
+	return c.WSDeleteUserMetadata(ctx, owner, key)
+}
+
+func (c *Client) ScanUserMetadata(ctx context.Context, token string, owner UserRef, req ScanUserMetadataRequest) (UserMetadataPage, error) {
+	_ = token
+	return c.WSScanUserMetadata(ctx, owner, req)
+}
+
 func (c *Client) Connect(ctx context.Context) error {
 	c.startOnce.Do(func() {
 		c.started.Store(true)
@@ -458,6 +478,139 @@ func (c *Client) DeleteUser(ctx context.Context, target UserRef) (DeleteUserResu
 		return zero, &ProtocolError{Message: "missing status in delete_user_response"}
 	}
 	return result, nil
+}
+
+func (c *Client) WSGetUserMetadata(ctx context.Context, owner UserRef, key string) (UserMetadata, error) {
+	var zero UserMetadata
+	if err := owner.validate(); err != nil {
+		return zero, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := validateMetadataKey(key); err != nil {
+		return zero, err
+	}
+
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_GetUserMetadata{
+				GetUserMetadata: &pb.GetUserMetadataRequest{
+					RequestId: requestID,
+					Owner:     userRefToProto(owner),
+					Key:       key,
+				},
+			},
+		}
+	})
+	if err != nil {
+		return zero, err
+	}
+
+	metadata, ok := res.value.(UserMetadata)
+	if !ok {
+		return zero, &ProtocolError{Message: "missing metadata in get_user_metadata_response"}
+	}
+	return metadata, nil
+}
+
+func (c *Client) WSUpsertUserMetadata(ctx context.Context, owner UserRef, key string, req UpsertUserMetadataRequest) (UserMetadata, error) {
+	var zero UserMetadata
+	if err := owner.validate(); err != nil {
+		return zero, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := validateMetadataKey(key); err != nil {
+		return zero, err
+	}
+
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_UpsertUserMetadata{
+				UpsertUserMetadata: &pb.UpsertUserMetadataRequest{
+					RequestId: requestID,
+					Owner:     userRefToProto(owner),
+					Key:       key,
+					Value:     append([]byte{}, req.Value...),
+					ExpiresAt: optionalStringField(req.ExpiresAt),
+				},
+			},
+		}
+	})
+	if err != nil {
+		return zero, err
+	}
+
+	metadata, ok := res.value.(UserMetadata)
+	if !ok {
+		return zero, &ProtocolError{Message: "missing metadata in upsert_user_metadata_response"}
+	}
+	return metadata, nil
+}
+
+func (c *Client) WSDeleteUserMetadata(ctx context.Context, owner UserRef, key string) (UserMetadata, error) {
+	var zero UserMetadata
+	if err := owner.validate(); err != nil {
+		return zero, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := validateMetadataKey(key); err != nil {
+		return zero, err
+	}
+
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_DeleteUserMetadata{
+				DeleteUserMetadata: &pb.DeleteUserMetadataRequest{
+					RequestId: requestID,
+					Owner:     userRefToProto(owner),
+					Key:       key,
+				},
+			},
+		}
+	})
+	if err != nil {
+		return zero, err
+	}
+
+	metadata, ok := res.value.(UserMetadata)
+	if !ok {
+		return zero, &ProtocolError{Message: "missing metadata in delete_user_metadata_response"}
+	}
+	return metadata, nil
+}
+
+func (c *Client) WSScanUserMetadata(ctx context.Context, owner UserRef, req ScanUserMetadataRequest) (UserMetadataPage, error) {
+	var zero UserMetadataPage
+	if err := owner.validate(); err != nil {
+		return zero, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := req.validate(); err != nil {
+		return zero, err
+	}
+
+	limit := int32(0)
+	if req.Limit > 0 {
+		limit = int32(req.Limit)
+	}
+
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_ScanUserMetadata{
+				ScanUserMetadata: &pb.ScanUserMetadataRequest{
+					RequestId: requestID,
+					Owner:     userRefToProto(owner),
+					Prefix:    req.Prefix,
+					After:     req.After,
+					Limit:     limit,
+				},
+			},
+		}
+	})
+	if err != nil {
+		return zero, err
+	}
+
+	page, ok := res.value.(UserMetadataPage)
+	if !ok {
+		return zero, &ProtocolError{Message: "missing page in scan_user_metadata_response"}
+	}
+	return page, nil
 }
 
 func (c *Client) UpsertAttachment(ctx context.Context, owner, subject UserRef, attachmentType AttachmentType, configJSON []byte) (Attachment, error) {
@@ -1012,6 +1165,14 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 		c.resolvePending(body.CreateUserResponse.RequestId, requestResult{value: userFromProto(body.CreateUserResponse.User)})
 	case *pb.ServerEnvelope_GetUserResponse:
 		c.resolvePending(body.GetUserResponse.RequestId, requestResult{value: userFromProto(body.GetUserResponse.User)})
+	case *pb.ServerEnvelope_GetUserMetadataResponse:
+		c.resolvePending(body.GetUserMetadataResponse.RequestId, requestResult{value: userMetadataFromProto(body.GetUserMetadataResponse.Metadata)})
+	case *pb.ServerEnvelope_UpsertUserMetadataResponse:
+		c.resolvePending(body.UpsertUserMetadataResponse.RequestId, requestResult{value: userMetadataFromProto(body.UpsertUserMetadataResponse.Metadata)})
+	case *pb.ServerEnvelope_DeleteUserMetadataResponse:
+		c.resolvePending(body.DeleteUserMetadataResponse.RequestId, requestResult{value: userMetadataFromProto(body.DeleteUserMetadataResponse.Metadata)})
+	case *pb.ServerEnvelope_ScanUserMetadataResponse:
+		c.resolvePending(body.ScanUserMetadataResponse.RequestId, requestResult{value: userMetadataPageFromProto(body.ScanUserMetadataResponse)})
 	case *pb.ServerEnvelope_UpdateUserResponse:
 		c.resolvePending(body.UpdateUserResponse.RequestId, requestResult{value: userFromProto(body.UpdateUserResponse.User)})
 	case *pb.ServerEnvelope_DeleteUserResponse:

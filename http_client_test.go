@@ -345,6 +345,151 @@ func TestHTTPClientListNodeLoggedInUsersRequiresNodeID(t *testing.T) {
 	}
 }
 
+func TestHTTPClientUserMetadataRequests(t *testing.T) {
+	owner := UserRef{NodeID: 4096, UserID: 1025}
+	key := "prefs.theme"
+	expiresAt := "2026-05-01T00:00:00Z"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/nodes/4096/users/1025/metadata", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected metadata scan method: %s", r.Method)
+		}
+		if got := r.URL.Query().Get("prefix"); got != "prefs." {
+			t.Fatalf("unexpected prefix: %q", got)
+		}
+		if got := r.URL.Query().Get("after"); got != key {
+			t.Fatalf("unexpected after: %q", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "2" {
+			t.Fatalf("unexpected limit: %q", got)
+		}
+		json.NewEncoder(w).Encode(UserMetadataPage{
+			Items: []UserMetadata{
+				{
+					Owner:        owner,
+					Key:          "prefs.alpha",
+					Value:        []byte{0xff, 0x00},
+					UpdatedAt:    "hlc-scan-1",
+					OriginNodeID: 4096,
+				},
+				{
+					Owner:        owner,
+					Key:          "prefs.beta",
+					Value:        []byte("next"),
+					UpdatedAt:    "hlc-scan-2",
+					ExpiresAt:    expiresAt,
+					OriginNodeID: 4096,
+				},
+			},
+			Count:     2,
+			NextAfter: "prefs.beta",
+		})
+	})
+	mux.HandleFunc("/nodes/4096/users/1025/metadata/", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		if got := r.URL.EscapedPath(); got != "/nodes/4096/users/1025/metadata/prefs.theme" {
+			t.Fatalf("unexpected escaped path: %q", got)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			json.NewEncoder(w).Encode(UserMetadata{
+				Owner:        owner,
+				Key:          key,
+				Value:        []byte{0xaa, 0xbb},
+				UpdatedAt:    "hlc-get",
+				ExpiresAt:    expiresAt,
+				OriginNodeID: 4096,
+			})
+		case http.MethodPut:
+			var raw map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				t.Fatalf("decode upsert metadata: %v", err)
+			}
+			if raw["value"] != "" {
+				t.Fatalf("expected empty metadata value to encode as empty base64 string, got %#v", raw["value"])
+			}
+			if raw["expires_at"] != expiresAt {
+				t.Fatalf("unexpected expires_at: %#v", raw["expires_at"])
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(UserMetadata{
+				Owner:        owner,
+				Key:          key,
+				Value:        []byte{},
+				UpdatedAt:    "hlc-upsert",
+				ExpiresAt:    expiresAt,
+				OriginNodeID: 4096,
+			})
+		case http.MethodDelete:
+			json.NewEncoder(w).Encode(UserMetadata{
+				Owner:        owner,
+				Key:          key,
+				Value:        []byte("gone"),
+				UpdatedAt:    "hlc-upsert",
+				DeletedAt:    "hlc-deleted",
+				ExpiresAt:    expiresAt,
+				OriginNodeID: 4096,
+			})
+		default:
+			t.Fatalf("unexpected metadata method: %s", r.Method)
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewHTTPClient(server.URL)
+	ctx := context.Background()
+
+	metadata, err := client.GetUserMetadata(ctx, "admin-token", owner, key)
+	if err != nil {
+		t.Fatalf("GetUserMetadata: %v", err)
+	}
+	if metadata.Key != key || base64.StdEncoding.EncodeToString(metadata.Value) != "qrs=" || metadata.ExpiresAt != expiresAt {
+		t.Fatalf("unexpected metadata: %+v", metadata)
+	}
+
+	upserted, err := client.UpsertUserMetadata(ctx, "admin-token", owner, key, UpsertUserMetadataRequest{
+		Value:     []byte{},
+		ExpiresAt: &expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("UpsertUserMetadata: %v", err)
+	}
+	if upserted.Key != key || len(upserted.Value) != 0 || upserted.UpdatedAt != "hlc-upsert" {
+		t.Fatalf("unexpected upsert response: %+v", upserted)
+	}
+
+	page, err := client.ScanUserMetadata(ctx, "admin-token", owner, ScanUserMetadataRequest{
+		Prefix: "prefs.",
+		After:  key,
+		Limit:  2,
+	})
+	if err != nil {
+		t.Fatalf("ScanUserMetadata: %v", err)
+	}
+	if !page.HasMore() || page.Count != 2 || page.NextAfter != "prefs.beta" {
+		t.Fatalf("unexpected metadata page: %+v", page)
+	}
+	if len(page.Items) != 2 || page.Items[0].Key != "prefs.alpha" || base64.StdEncoding.EncodeToString(page.Items[0].Value) != "/wA=" {
+		t.Fatalf("unexpected metadata items: %+v", page.Items)
+	}
+
+	deleted, err := client.DeleteUserMetadata(ctx, "admin-token", owner, key)
+	if err != nil {
+		t.Fatalf("DeleteUserMetadata: %v", err)
+	}
+	if deleted.DeletedAt != "hlc-deleted" || string(deleted.Value) != "gone" {
+		t.Fatalf("unexpected deleted metadata: %+v", deleted)
+	}
+}
+
 func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/login", func(w http.ResponseWriter, r *http.Request) {

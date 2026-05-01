@@ -2,6 +2,8 @@ package turntf
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	pb "github.com/tursom/turntf-go/internal/proto"
 )
@@ -46,6 +48,10 @@ const (
 	DeliveryModeBestEffort  DeliveryMode = "best_effort"
 	DeliveryModeRouteRetry  DeliveryMode = "route_retry"
 )
+
+const maxUserMetadataLimit = 1000
+
+var metadataKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 
 type Message struct {
 	Recipient    UserRef `json:"recipient"`
@@ -109,6 +115,33 @@ type BlacklistEntry struct {
 	BlockedAt    string  `json:"blocked_at,omitempty"`
 	DeletedAt    string  `json:"deleted_at,omitempty"`
 	OriginNodeID int64   `json:"origin_node_id"`
+}
+
+type UserMetadata struct {
+	Owner        UserRef `json:"owner"`
+	Key          string  `json:"key"`
+	Value        []byte  `json:"value"`
+	UpdatedAt    string  `json:"updated_at,omitempty"`
+	DeletedAt    string  `json:"deleted_at,omitempty"`
+	ExpiresAt    string  `json:"expires_at,omitempty"`
+	OriginNodeID int64   `json:"origin_node_id"`
+}
+
+type UpsertUserMetadataRequest struct {
+	Value     []byte  `json:"value"`
+	ExpiresAt *string `json:"expires_at,omitempty"`
+}
+
+type ScanUserMetadataRequest struct {
+	Prefix string `json:"prefix,omitempty"`
+	After  string `json:"after,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
+type UserMetadataPage struct {
+	Items     []UserMetadata `json:"items"`
+	Count     int            `json:"count"`
+	NextAfter string         `json:"next_after,omitempty"`
 }
 
 type Event struct {
@@ -251,12 +284,55 @@ func (m Message) Cursor() MessageCursor {
 	return MessageCursor{NodeID: m.NodeID, Seq: m.Seq}
 }
 
+func (p UserMetadataPage) HasMore() bool {
+	return p.NextAfter != ""
+}
+
 func (r UserRef) validate() error {
 	if r.NodeID == 0 {
 		return fmt.Errorf("node_id is required")
 	}
 	if r.UserID == 0 {
 		return fmt.Errorf("user_id is required")
+	}
+	return nil
+}
+
+func validateMetadataKey(key string) error {
+	return validateMetadataKeyFragment(key, "key", false)
+}
+
+func validateMetadataKeyFragment(value, field string, allowEmpty bool) error {
+	if value == "" {
+		if allowEmpty {
+			return nil
+		}
+		return fmt.Errorf("%s is required", field)
+	}
+	if len(value) > 128 {
+		return fmt.Errorf("%s cannot exceed 128 characters", field)
+	}
+	if !metadataKeyPattern.MatchString(value) {
+		return fmt.Errorf("%s contains unsupported characters", field)
+	}
+	return nil
+}
+
+func (r ScanUserMetadataRequest) validate() error {
+	if err := validateMetadataKeyFragment(r.Prefix, "prefix", true); err != nil {
+		return err
+	}
+	if err := validateMetadataKeyFragment(r.After, "after", true); err != nil {
+		return err
+	}
+	if r.Limit < 0 {
+		return fmt.Errorf("limit must be a non-negative integer")
+	}
+	if r.Limit > maxUserMetadataLimit {
+		return fmt.Errorf("limit cannot exceed %d", maxUserMetadataLimit)
+	}
+	if r.Prefix != "" && r.After != "" && !strings.HasPrefix(r.After, r.Prefix) {
+		return fmt.Errorf("after must use the same prefix as prefix")
 	}
 	return nil
 }
@@ -492,6 +568,32 @@ func blacklistEntryFromProto(in *pb.Attachment) BlacklistEntry {
 	}
 }
 
+func userMetadataFromProto(in *pb.UserMetadata) UserMetadata {
+	if in == nil {
+		return UserMetadata{}
+	}
+	return UserMetadata{
+		Owner:        userRefFromProto(in.Owner),
+		Key:          in.Key,
+		Value:        append([]byte(nil), in.Value...),
+		UpdatedAt:    in.UpdatedAt,
+		DeletedAt:    in.DeletedAt,
+		ExpiresAt:    in.ExpiresAt,
+		OriginNodeID: in.OriginNodeId,
+	}
+}
+
+func userMetadataPageFromProto(in *pb.ScanUserMetadataResponse) UserMetadataPage {
+	if in == nil {
+		return UserMetadataPage{}
+	}
+	return UserMetadataPage{
+		Items:     userMetadataItemsFromProto(in.Items),
+		Count:     int(in.Count),
+		NextAfter: in.NextAfter,
+	}
+}
+
 func eventFromProto(in *pb.Event) Event {
 	if in == nil {
 		return Event{}
@@ -697,6 +799,14 @@ func blacklistEntriesFromProto(items []*pb.Attachment) []BlacklistEntry {
 	out := make([]BlacklistEntry, 0, len(items))
 	for _, item := range items {
 		out = append(out, blacklistEntryFromProto(item))
+	}
+	return out
+}
+
+func userMetadataItemsFromProto(items []*pb.UserMetadata) []UserMetadata {
+	out := make([]UserMetadata, 0, len(items))
+	for _, item := range items {
+		out = append(out, userMetadataFromProto(item))
 	}
 	return out
 }

@@ -812,6 +812,180 @@ func TestClientBlacklistAndOperationsStatusRPCs(t *testing.T) {
 	}
 }
 
+func TestClientUserMetadataRPCs(t *testing.T) {
+	owner := UserRef{NodeID: 4096, UserID: 1025}
+	key := "prefs.theme"
+	expiresAt := "2026-05-01T00:00:00Z"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		_ = mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
+					ProtocolVersion: "client-v1alpha2",
+				},
+			},
+		})
+
+		getReq := mustReadClientEnvelope(t, conn)
+		if got := getReq.GetGetUserMetadata(); got == nil || got.GetOwner().GetUserId() != owner.UserID || got.GetKey() != key {
+			t.Fatalf("unexpected get metadata request: %+v", got)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_GetUserMetadataResponse{
+				GetUserMetadataResponse: &pb.GetUserMetadataResponse{
+					RequestId: getReq.GetGetUserMetadata().GetRequestId(),
+					Metadata: &pb.UserMetadata{
+						Owner:        userRefToProto(owner),
+						Key:          key,
+						Value:        []byte{0xff, 0x00},
+						UpdatedAt:    "hlc-get",
+						ExpiresAt:    expiresAt,
+						OriginNodeId: 4096,
+					},
+				},
+			},
+		})
+
+		upsertReq := mustReadClientEnvelope(t, conn)
+		if got := upsertReq.GetUpsertUserMetadata(); got == nil || got.GetKey() != key || got.GetExpiresAt().GetValue() != expiresAt || len(got.GetValue()) != 0 {
+			t.Fatalf("unexpected upsert metadata request: %+v", got)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_UpsertUserMetadataResponse{
+				UpsertUserMetadataResponse: &pb.UpsertUserMetadataResponse{
+					RequestId: upsertReq.GetUpsertUserMetadata().GetRequestId(),
+					Metadata: &pb.UserMetadata{
+						Owner:        userRefToProto(owner),
+						Key:          key,
+						Value:        []byte{},
+						UpdatedAt:    "hlc-upsert",
+						ExpiresAt:    expiresAt,
+						OriginNodeId: 4096,
+					},
+				},
+			},
+		})
+
+		scanReq := mustReadClientEnvelope(t, conn)
+		if got := scanReq.GetScanUserMetadata(); got == nil || got.GetPrefix() != "prefs." || got.GetAfter() != key || got.GetLimit() != 2 {
+			t.Fatalf("unexpected scan metadata request: %+v", got)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_ScanUserMetadataResponse{
+				ScanUserMetadataResponse: &pb.ScanUserMetadataResponse{
+					RequestId: scanReq.GetScanUserMetadata().GetRequestId(),
+					Items: []*pb.UserMetadata{
+						{
+							Owner:        userRefToProto(owner),
+							Key:          "prefs.alpha",
+							Value:        []byte{0xaa},
+							UpdatedAt:    "hlc-scan-1",
+							OriginNodeId: 4096,
+						},
+						{
+							Owner:        userRefToProto(owner),
+							Key:          "prefs.beta",
+							Value:        []byte("next"),
+							UpdatedAt:    "hlc-scan-2",
+							ExpiresAt:    expiresAt,
+							OriginNodeId: 4096,
+						},
+					},
+					Count:     2,
+					NextAfter: "prefs.beta",
+				},
+			},
+		})
+
+		deleteReq := mustReadClientEnvelope(t, conn)
+		if got := deleteReq.GetDeleteUserMetadata(); got == nil || got.GetKey() != key {
+			t.Fatalf("unexpected delete metadata request: %+v", got)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_DeleteUserMetadataResponse{
+				DeleteUserMetadataResponse: &pb.DeleteUserMetadataResponse{
+					RequestId: deleteReq.GetDeleteUserMetadata().GetRequestId(),
+					Metadata: &pb.UserMetadata{
+						Owner:        userRefToProto(owner),
+						Key:          key,
+						Value:        []byte("gone"),
+						UpdatedAt:    "hlc-upsert",
+						DeletedAt:    "hlc-deleted",
+						ExpiresAt:    expiresAt,
+						OriginNodeId: 4096,
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:        server.URL,
+		Credentials:    Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
+		RequestTimeout: 2 * time.Second,
+		PingInterval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	metadata, err := client.GetUserMetadata(ctx, "", owner, key)
+	if err != nil {
+		t.Fatalf("GetUserMetadata: %v", err)
+	}
+	if metadata.Key != key || metadata.UpdatedAt != "hlc-get" || metadata.ExpiresAt != expiresAt || len(metadata.Value) != 2 || metadata.Value[0] != 0xff {
+		t.Fatalf("unexpected metadata: %+v", metadata)
+	}
+
+	upserted, err := client.UpsertUserMetadata(ctx, "", owner, key, UpsertUserMetadataRequest{
+		Value:     []byte{},
+		ExpiresAt: &expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("UpsertUserMetadata: %v", err)
+	}
+	if upserted.Key != key || len(upserted.Value) != 0 || upserted.UpdatedAt != "hlc-upsert" {
+		t.Fatalf("unexpected upserted metadata: %+v", upserted)
+	}
+
+	page, err := client.ScanUserMetadata(ctx, "", owner, ScanUserMetadataRequest{
+		Prefix: "prefs.",
+		After:  key,
+		Limit:  2,
+	})
+	if err != nil {
+		t.Fatalf("ScanUserMetadata: %v", err)
+	}
+	if !page.HasMore() || page.Count != 2 || page.NextAfter != "prefs.beta" || len(page.Items) != 2 || page.Items[1].ExpiresAt != expiresAt {
+		t.Fatalf("unexpected metadata page: %+v", page)
+	}
+
+	deleted, err := client.DeleteUserMetadata(ctx, "", owner, key)
+	if err != nil {
+		t.Fatalf("DeleteUserMetadata: %v", err)
+	}
+	if deleted.DeletedAt != "hlc-deleted" || string(deleted.Value) != "gone" {
+		t.Fatalf("unexpected deleted metadata: %+v", deleted)
+	}
+}
+
 func TestClientListNodeLoggedInUsersRequiresNodeID(t *testing.T) {
 	client, err := NewClient(Config{
 		BaseURL:      "http://127.0.0.1:8080",

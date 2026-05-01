@@ -314,6 +314,89 @@ func (c *HTTPClient) ListBlockedUsers(ctx context.Context, token string, owner U
 	return items, nil
 }
 
+func (c *HTTPClient) GetUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
+	var metadata UserMetadata
+	if err := owner.validate(); err != nil {
+		return metadata, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := validateMetadataKey(key); err != nil {
+		return metadata, err
+	}
+
+	err := c.doJSON(ctx, http.MethodGet, userMetadataPath(owner, key), token, nil, &metadata, http.StatusOK)
+	if err != nil {
+		return UserMetadata{}, err
+	}
+	return userMetadataFromHTTP(metadata), nil
+}
+
+func (c *HTTPClient) UpsertUserMetadata(ctx context.Context, token string, owner UserRef, key string, req UpsertUserMetadataRequest) (UserMetadata, error) {
+	var metadata UserMetadata
+	if err := owner.validate(); err != nil {
+		return metadata, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := validateMetadataKey(key); err != nil {
+		return metadata, err
+	}
+
+	err := c.doJSON(ctx, http.MethodPut, userMetadataPath(owner, key), token, UpsertUserMetadataRequest{
+		Value:     append([]byte{}, req.Value...),
+		ExpiresAt: req.ExpiresAt,
+	}, &metadata, http.StatusCreated, http.StatusOK)
+	if err != nil {
+		return UserMetadata{}, err
+	}
+	return userMetadataFromHTTP(metadata), nil
+}
+
+func (c *HTTPClient) DeleteUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
+	var metadata UserMetadata
+	if err := owner.validate(); err != nil {
+		return metadata, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := validateMetadataKey(key); err != nil {
+		return metadata, err
+	}
+
+	err := c.doJSON(ctx, http.MethodDelete, userMetadataPath(owner, key), token, nil, &metadata, http.StatusOK)
+	if err != nil {
+		return UserMetadata{}, err
+	}
+	return userMetadataFromHTTP(metadata), nil
+}
+
+func (c *HTTPClient) ScanUserMetadata(ctx context.Context, token string, owner UserRef, req ScanUserMetadataRequest) (UserMetadataPage, error) {
+	if err := owner.validate(); err != nil {
+		return UserMetadataPage{}, fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := req.validate(); err != nil {
+		return UserMetadataPage{}, err
+	}
+
+	values := url.Values{}
+	if req.Prefix != "" {
+		values.Set("prefix", req.Prefix)
+	}
+	if req.After != "" {
+		values.Set("after", req.After)
+	}
+	if req.Limit > 0 {
+		values.Set("limit", strconv.Itoa(req.Limit))
+	}
+
+	path := fmt.Sprintf("/nodes/%d/users/%d/metadata", owner.NodeID, owner.UserID)
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+
+	var page UserMetadataPage
+	err := c.doJSON(ctx, http.MethodGet, path, token, nil, &page, http.StatusOK)
+	if err != nil {
+		return UserMetadataPage{}, err
+	}
+	return userMetadataPageFromHTTP(page), nil
+}
+
 func (c *HTTPClient) UpsertAttachment(ctx context.Context, token string, owner, subject UserRef, attachmentType AttachmentType, configJSON []byte) (Attachment, error) {
 	var attachment Attachment
 	if err := owner.validate(); err != nil {
@@ -448,6 +531,27 @@ func messagesFromHTTP(items []httpMessageResponse) []Message {
 	out := make([]Message, 0, len(items))
 	for _, item := range items {
 		out = append(out, messageFromHTTP(item))
+	}
+	return out
+}
+
+func userMetadataPath(owner UserRef, key string) string {
+	return fmt.Sprintf("/nodes/%d/users/%d/metadata/%s", owner.NodeID, owner.UserID, url.PathEscape(key))
+}
+
+func userMetadataFromHTTP(in UserMetadata) UserMetadata {
+	in.Value = append([]byte(nil), in.Value...)
+	return in
+}
+
+func userMetadataPageFromHTTP(in UserMetadataPage) UserMetadataPage {
+	out := UserMetadataPage{
+		Items:     make([]UserMetadata, 0, len(in.Items)),
+		Count:     in.Count,
+		NextAfter: in.NextAfter,
+	}
+	for _, item := range in.Items {
+		out.Items = append(out.Items, userMetadataFromHTTP(item))
 	}
 	return out
 }
