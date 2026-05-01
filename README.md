@@ -18,6 +18,8 @@ SDK 的目标不是简单映射 REST 或 protobuf 字段，而是把业务接入
 - [Go SDK 使用总览](docs/sdk-guide.md)：推荐先读。覆盖定位、能力选型、配置项、生命周期、自动重连、错误处理、proto 生成约束。
 - [客户端全流程接入文档](docs/client-flow.md)：从创建用户、初始化本地游标到稳定收发消息的端到端流程。
 - [客户端 WebSocket 接口](docs/client-websocket.md)：`ClientEnvelope` / `ServerEnvelope` 级别的协议语义、`/ws/client` 与 `/ws/realtime` 边界。
+- [API 参考文档](docs/api-reference.md)：类型、方法、错误的完整参考。
+- [HTTP 客户端使用指南](docs/http-client-guide.md)：`HTTPClient` 的详细用法和注意事项。
 - [运维与上线手册](docs/operations.md)：上线、恢复、监控相关说明。
 - [Demo YAML 示例](docs/examples/)：多节点、多 session 的收发验证脚本。
 
