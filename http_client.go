@@ -258,13 +258,16 @@ func (c *HTTPClient) CreateSubscription(ctx context.Context, token string, userR
 
 // ListMessages 通过 HTTP 接口查询指定用户的消息列表。limit 控制返回的消息数量上限。
 // token 为认证令牌，target 指定消息所属用户。
-func (c *HTTPClient) ListMessages(ctx context.Context, token string, target UserRef, limit int) ([]Message, error) {
-	if err := target.validate(); err != nil {
-		return nil, fmt.Errorf("invalid target: %w", err)
-	}
+// peerNodeID 和 peerUserID 为可选的会话过滤参数，同时指定时将仅返回与指定 Peer 相关的消息。
+// target 的 node_id/user_id 允许为 0（服务端将其解析为"当前用户"）。
+func (c *HTTPClient) ListMessages(ctx context.Context, token string, target UserRef, limit int, peerNodeID, peerUserID int64) ([]Message, error) {
 	values := url.Values{}
 	if limit > 0 {
 		values.Set("limit", strconv.Itoa(limit))
+	}
+	if peerNodeID != 0 || peerUserID != 0 {
+		values.Set("peer_node_id", strconv.FormatInt(peerNodeID, 10))
+		values.Set("peer_user_id", strconv.FormatInt(peerUserID, 10))
 	}
 	path := fmt.Sprintf("/nodes/%d/users/%d/messages", target.NodeID, target.UserID)
 	if encoded := values.Encode(); encoded != "" {

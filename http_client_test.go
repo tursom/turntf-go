@@ -274,7 +274,7 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		t.Fatalf("CreateSubscription: %v", err)
 	}
 
-	messages, err := client.ListMessages(ctx, token, UserRef{NodeID: 4096, UserID: 1025}, 20)
+	messages, err := client.ListMessages(ctx, token, UserRef{NodeID: 4096, UserID: 1025}, 20, 0, 0)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
