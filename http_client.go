@@ -130,6 +130,33 @@ func (r *httpAttachmentsResponse) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*alias)(r))
 }
 
+type httpDeleteUserResponse struct {
+	Status string `json:"status"`
+	NodeID int64  `json:"node_id"`
+	UserID int64  `json:"user_id"`
+}
+
+type httpEventsResponse struct {
+	Items []Event `json:"items"`
+	Count int     `json:"count"`
+}
+
+type httpUpdateUserRequest struct {
+	Username  *string          `json:"username,omitempty"`
+	LoginName *string          `json:"login_name,omitempty"`
+	Password  *string          `json:"password,omitempty"`
+	Profile   *json.RawMessage `json:"profile,omitempty"`
+	Role      *string          `json:"role,omitempty"`
+}
+
+func (r *httpEventsResponse) UnmarshalJSON(data []byte) error {
+	if isJSONArray(data) {
+		return json.Unmarshal(data, &r.Items)
+	}
+	type alias httpEventsResponse
+	return json.Unmarshal(data, (*alias)(r))
+}
+
 func (c *HTTPClient) client() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
@@ -366,6 +393,99 @@ func (c *HTTPClient) ListBlockedUsers(ctx context.Context, token string, owner U
 	return items, nil
 }
 
+// GetUser 通过 HTTP 接口获取指定用户的详细信息。
+func (c *HTTPClient) GetUser(ctx context.Context, token string, target UserRef) (User, error) {
+	if err := target.validate(); err != nil {
+		return User{}, fmt.Errorf("invalid target: %w", err)
+	}
+	var resp httpUserResponse
+	path := fmt.Sprintf("/nodes/%d/users/%d", target.NodeID, target.UserID)
+	err := c.doJSON(ctx, http.MethodGet, path, token, nil, &resp, http.StatusOK)
+	if err != nil {
+		return User{}, err
+	}
+	return userFromHTTP(resp), nil
+}
+
+// UpdateUser 通过 HTTP 接口更新用户信息。仅非 nil 字段会被更新。
+// login_name 为空字符串时表示解除登录名绑定。频道（role="channel"）不支持设置 login_name。
+func (c *HTTPClient) UpdateUser(ctx context.Context, token string, target UserRef, req UpdateUserRequest) (User, error) {
+	if err := target.validate(); err != nil {
+		return User{}, fmt.Errorf("invalid target: %w", err)
+	}
+	if req.Role != nil && *req.Role == "channel" && req.LoginName != nil && *req.LoginName != "" {
+		return User{}, fmt.Errorf("channel users cannot have a login_name")
+	}
+	body := httpUpdateUserRequest{
+		Username:  req.Username,
+		LoginName: req.LoginName,
+		Role:      req.Role,
+	}
+	if req.Password != nil {
+		v := req.Password.WireValue()
+		body.Password = &v
+	}
+	if req.ProfileJSON != nil {
+		raw := json.RawMessage(append([]byte{}, *req.ProfileJSON...))
+		body.Profile = &raw
+	}
+	var resp httpUserResponse
+	path := fmt.Sprintf("/nodes/%d/users/%d", target.NodeID, target.UserID)
+	err := c.doJSON(ctx, http.MethodPatch, path, token, body, &resp, http.StatusOK)
+	if err != nil {
+		return User{}, err
+	}
+	return userFromHTTP(resp), nil
+}
+
+// DeleteUser 通过 HTTP 接口删除指定用户（软删除）。
+func (c *HTTPClient) DeleteUser(ctx context.Context, token string, target UserRef) (DeleteUserResult, error) {
+	if err := target.validate(); err != nil {
+		return DeleteUserResult{}, fmt.Errorf("invalid target: %w", err)
+	}
+	var resp httpDeleteUserResponse
+	path := fmt.Sprintf("/nodes/%d/users/%d", target.NodeID, target.UserID)
+	err := c.doJSON(ctx, http.MethodDelete, path, token, nil, &resp, http.StatusOK)
+	if err != nil {
+		return DeleteUserResult{}, err
+	}
+	return DeleteUserResult{
+		Status: resp.Status,
+		User:   UserRef{NodeID: resp.NodeID, UserID: resp.UserID},
+	}, nil
+}
+
+// ListEvents 通过 HTTP 接口查询事件日志，支持分页游标。
+// after 为起始事件序列号（不含），limit 控制返回数量上限。
+func (c *HTTPClient) ListEvents(ctx context.Context, token string, after int64, limit int) ([]Event, error) {
+	values := url.Values{}
+	if after > 0 {
+		values.Set("after", strconv.FormatInt(after, 10))
+	}
+	if limit > 0 {
+		values.Set("limit", strconv.Itoa(limit))
+	}
+	path := "/events"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var resp httpEventsResponse
+	err := c.doJSON(ctx, http.MethodGet, path, token, nil, &resp, http.StatusOK)
+	return resp.Items, err
+}
+
+// OperationsStatus 通过 HTTP 接口查询节点运行状态，包含消息窗口、写闸门、投影等指标。
+func (c *HTTPClient) OperationsStatus(ctx context.Context, token string) (OperationsStatus, error) {
+	var status OperationsStatus
+	err := c.doJSON(ctx, http.MethodGet, "/ops/status", token, nil, &status, http.StatusOK)
+	return status, err
+}
+
+// Metrics 通过 HTTP 接口获取 Prometheus 格式的监控指标文本。
+func (c *HTTPClient) Metrics(ctx context.Context, token string) (string, error) {
+	return c.doText(ctx, "/metrics", token, http.StatusOK)
+}
+
 // GetUserMetadata 通过 HTTP 接口获取指定用户的指定元数据键值。
 // key 为元数据键名，仅允许字母、数字、点、下划线、冒号和短横线。
 func (c *HTTPClient) GetUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
@@ -538,6 +658,31 @@ func (c *HTTPClient) doJSON(ctx context.Context, method, path, token string, req
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *HTTPClient) doText(ctx context.Context, path, token string, wantStatuses ...int) (string, error) {
+	fullURL := strings.TrimRight(c.BaseURL, "/") + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	if err != nil {
+		return "", err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return "", &ConnectionError{Op: "GET " + path, Err: err}
+	}
+	defer resp.Body.Close()
+	if !statusAllowed(resp.StatusCode, wantStatuses) {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return "", &ProtocolError{Message: fmt.Sprintf("unexpected HTTP status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", &ConnectionError{Op: "GET " + path, Err: err}
+	}
+	return string(data), nil
 }
 
 func statusAllowed(status int, allowed []int) bool {
