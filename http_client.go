@@ -12,11 +12,15 @@ import (
 	"strings"
 )
 
+// HTTPClient 是基于 HTTP REST API 的客户端，提供与 WebSocket 客户端相同功能子集的 HTTP 接口。
+// 所有 HTTP 方法都需要传入认证 token（登录接口除外）。
 type HTTPClient struct {
 	BaseURL    string
 	HTTPClient *http.Client
 }
 
+// NewHTTPClient 创建并返回一个新的 HTTPClient 实例。
+// baseURL 为服务端的基础地址（如 "http://localhost:8080"），末尾的斜杠会被自动去除。
 func NewHTTPClient(baseURL string) *HTTPClient {
 	return &HTTPClient{BaseURL: strings.TrimRight(baseURL, "/")}
 }
@@ -133,6 +137,8 @@ func (c *HTTPClient) client() *http.Client {
 	return http.DefaultClient
 }
 
+// Login 通过 HTTP 接口使用明文密码登录，通过节点 ID 和用户 ID 标识用户。
+// 返回认证 token，后续请求需在 Header 中携带 Bearer token。
 func (c *HTTPClient) Login(ctx context.Context, nodeID, userID int64, password string) (string, error) {
 	input, err := PlainPassword(password)
 	if err != nil {
@@ -141,10 +147,14 @@ func (c *HTTPClient) Login(ctx context.Context, nodeID, userID int64, password s
 	return c.LoginWithPassword(ctx, nodeID, userID, input)
 }
 
+// LoginWithPassword 通过 HTTP 接口使用 PasswordInput 密码登录，通过节点 ID 和用户 ID 标识用户。
+// password 支持明文和已哈希两种模式。
 func (c *HTTPClient) LoginWithPassword(ctx context.Context, nodeID, userID int64, password PasswordInput) (string, error) {
 	return c.loginWithRequest(ctx, httpLoginRequest{NodeID: nodeID, UserID: userID}, password)
 }
 
+// LoginByLoginName 通过 HTTP 接口使用明文密码和登录名登录。
+// loginName 为用户的登录名，而非 node_id + user_id 组合。
 func (c *HTTPClient) LoginByLoginName(ctx context.Context, loginName, password string) (string, error) {
 	input, err := PlainPassword(password)
 	if err != nil {
@@ -153,6 +163,8 @@ func (c *HTTPClient) LoginByLoginName(ctx context.Context, loginName, password s
 	return c.LoginByLoginNameWithPassword(ctx, loginName, input)
 }
 
+// LoginByLoginNameWithPassword 通过 HTTP 接口使用 PasswordInput 密码和登录名登录。
+// password 支持明文和已哈希两种模式。
 func (c *HTTPClient) LoginByLoginNameWithPassword(ctx context.Context, loginName string, password PasswordInput) (string, error) {
 	return c.loginWithRequest(ctx, httpLoginRequest{LoginName: loginName}, password)
 }
@@ -178,6 +190,8 @@ func (c *HTTPClient) loginWithRequest(ctx context.Context, req httpLoginRequest,
 	return resp.Token, nil
 }
 
+// CreateUser 通过 HTTP 接口创建用户或频道。
+// token 为认证令牌，req 包含用户信息（用户名、角色为必填）。
 func (c *HTTPClient) CreateUser(ctx context.Context, token string, req CreateUserRequest) (User, error) {
 	var resp httpUserResponse
 	if req.Username == "" {
@@ -199,6 +213,8 @@ func (c *HTTPClient) CreateUser(ctx context.Context, token string, req CreateUse
 	return userFromHTTP(resp), nil
 }
 
+// CreateChannel 通过 HTTP 接口创建频道。与 CreateUser 类似，但 Role 默认设为 "channel"。
+// token 为认证令牌，req 中 Role 为空时会自动设置为 "channel"。
 func (c *HTTPClient) CreateChannel(ctx context.Context, token string, req CreateUserRequest) (User, error) {
 	if req.Role == "" {
 		req.Role = "channel"
@@ -206,11 +222,15 @@ func (c *HTTPClient) CreateChannel(ctx context.Context, token string, req Create
 	return c.CreateUser(ctx, token, req)
 }
 
+// CreateSubscription 通过 HTTP 接口创建频道订阅关系。订阅者将收到频道的消息推送。
+// userRef 为订阅者，channelRef 为要订阅的频道。
 func (c *HTTPClient) CreateSubscription(ctx context.Context, token string, userRef, channelRef UserRef) error {
 	_, err := c.UpsertAttachment(ctx, token, userRef, channelRef, AttachmentTypeChannelSubscription, []byte("{}"))
 	return err
 }
 
+// ListMessages 通过 HTTP 接口查询指定用户的消息列表。limit 控制返回的消息数量上限。
+// token 为认证令牌，target 指定消息所属用户。
 func (c *HTTPClient) ListMessages(ctx context.Context, token string, target UserRef, limit int) ([]Message, error) {
 	if err := target.validate(); err != nil {
 		return nil, fmt.Errorf("invalid target: %w", err)
@@ -229,6 +249,8 @@ func (c *HTTPClient) ListMessages(ctx context.Context, token string, target User
 	return messagesFromHTTP(resp.Items), err
 }
 
+// PostMessage 通过 HTTP 接口向目标用户发送一条持久化消息。
+// body 为消息内容的字节数组，不能为空。返回已保存的消息详情。
 func (c *HTTPClient) PostMessage(ctx context.Context, token string, target UserRef, body []byte) (Message, error) {
 	var resp httpMessageResponse
 	if err := target.validate(); err != nil {
@@ -247,6 +269,8 @@ func (c *HTTPClient) PostMessage(ctx context.Context, token string, target UserR
 	return messageFromHTTP(resp), nil
 }
 
+// PostPacket 通过 HTTP 接口发送瞬时消息（非持久化）。消息不会被存储，适合通知类场景。
+// targetNodeID 为目标节点 ID，relayTarget 为目标用户，mode 为投递模式。
 func (c *HTTPClient) PostPacket(ctx context.Context, token string, targetNodeID int64, relayTarget UserRef, body []byte, mode DeliveryMode) error {
 	if targetNodeID == 0 {
 		return fmt.Errorf("target node_id is required")
@@ -273,12 +297,15 @@ func (c *HTTPClient) PostPacket(ctx context.Context, token string, targetNodeID 
 	}, nil, http.StatusAccepted)
 }
 
+// ListClusterNodes 通过 HTTP 接口查询集群中的所有节点列表。
 func (c *HTTPClient) ListClusterNodes(ctx context.Context, token string) ([]ClusterNode, error) {
 	var resp httpClusterNodesResponse
 	err := c.doJSON(ctx, http.MethodGet, "/cluster/nodes", token, nil, &resp, http.StatusOK)
 	return resp.Nodes, err
 }
 
+// ListNodeLoggedInUsers 通过 HTTP 接口查询指定节点上当前已登录的用户列表。
+// nodeID 为目标节点 ID，不能为 0。
 func (c *HTTPClient) ListNodeLoggedInUsers(ctx context.Context, token string, nodeID int64) ([]LoggedInUser, error) {
 	if nodeID == 0 {
 		return nil, fmt.Errorf("node_id is required")
@@ -290,6 +317,7 @@ func (c *HTTPClient) ListNodeLoggedInUsers(ctx context.Context, token string, no
 	return resp.Items, err
 }
 
+// BlockUser 通过 HTTP 接口将指定用户加入黑名单。被拉黑的用户无法向 owner 发送消息。
 func (c *HTTPClient) BlockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
 	attachment, err := c.UpsertAttachment(ctx, token, owner, blocked, AttachmentTypeUserBlacklist, []byte("{}"))
 	if err != nil {
@@ -304,6 +332,7 @@ func (c *HTTPClient) BlockUser(ctx context.Context, token string, owner, blocked
 	}, nil
 }
 
+// UnblockUser 通过 HTTP 接口将指定用户移出黑名单。
 func (c *HTTPClient) UnblockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
 	attachment, err := c.DeleteAttachment(ctx, token, owner, blocked, AttachmentTypeUserBlacklist)
 	if err != nil {
@@ -318,6 +347,7 @@ func (c *HTTPClient) UnblockUser(ctx context.Context, token string, owner, block
 	}, nil
 }
 
+// ListBlockedUsers 通过 HTTP 接口查询指定用户的黑名单列表。
 func (c *HTTPClient) ListBlockedUsers(ctx context.Context, token string, owner UserRef) ([]BlacklistEntry, error) {
 	attachments, err := c.ListAttachments(ctx, token, owner, AttachmentTypeUserBlacklist)
 	if err != nil {
@@ -336,6 +366,8 @@ func (c *HTTPClient) ListBlockedUsers(ctx context.Context, token string, owner U
 	return items, nil
 }
 
+// GetUserMetadata 通过 HTTP 接口获取指定用户的指定元数据键值。
+// key 为元数据键名，仅允许字母、数字、点、下划线、冒号和短横线。
 func (c *HTTPClient) GetUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
 	var metadata UserMetadata
 	if err := owner.validate(); err != nil {
@@ -352,6 +384,8 @@ func (c *HTTPClient) GetUserMetadata(ctx context.Context, token string, owner Us
 	return userMetadataFromHTTP(metadata), nil
 }
 
+// UpsertUserMetadata 通过 HTTP 接口创建或更新用户元数据。
+// key 为元数据键名，req 包含新的值和可选的过期时间。
 func (c *HTTPClient) UpsertUserMetadata(ctx context.Context, token string, owner UserRef, key string, req UpsertUserMetadataRequest) (UserMetadata, error) {
 	var metadata UserMetadata
 	if err := owner.validate(); err != nil {
@@ -371,6 +405,7 @@ func (c *HTTPClient) UpsertUserMetadata(ctx context.Context, token string, owner
 	return userMetadataFromHTTP(metadata), nil
 }
 
+// DeleteUserMetadata 通过 HTTP 接口删除用户元数据（软删除）。
 func (c *HTTPClient) DeleteUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
 	var metadata UserMetadata
 	if err := owner.validate(); err != nil {
@@ -387,6 +422,8 @@ func (c *HTTPClient) DeleteUserMetadata(ctx context.Context, token string, owner
 	return userMetadataFromHTTP(metadata), nil
 }
 
+// ScanUserMetadata 通过 HTTP 接口按前缀分页扫描用户元数据。
+// req 包含前缀过滤条件、分页游标和每页限制数量。
 func (c *HTTPClient) ScanUserMetadata(ctx context.Context, token string, owner UserRef, req ScanUserMetadataRequest) (UserMetadataPage, error) {
 	if err := owner.validate(); err != nil {
 		return UserMetadataPage{}, fmt.Errorf("invalid owner: %w", err)
@@ -419,6 +456,8 @@ func (c *HTTPClient) ScanUserMetadata(ctx context.Context, token string, owner U
 	return userMetadataPageFromHTTP(page), nil
 }
 
+// UpsertAttachment 通过 HTTP 接口创建或更新用户之间的关联关系（如频道订阅、黑名单等）。
+// attachmentType 指定关系类型，configJSON 为可选的配置 JSON。
 func (c *HTTPClient) UpsertAttachment(ctx context.Context, token string, owner, subject UserRef, attachmentType AttachmentType, configJSON []byte) (Attachment, error) {
 	var attachment Attachment
 	if err := owner.validate(); err != nil {
@@ -434,6 +473,7 @@ func (c *HTTPClient) UpsertAttachment(ctx context.Context, token string, owner, 
 	return attachment, err
 }
 
+// DeleteAttachment 通过 HTTP 接口删除用户之间的关联关系。
 func (c *HTTPClient) DeleteAttachment(ctx context.Context, token string, owner, subject UserRef, attachmentType AttachmentType) (Attachment, error) {
 	var attachment Attachment
 	if err := owner.validate(); err != nil {
@@ -447,6 +487,7 @@ func (c *HTTPClient) DeleteAttachment(ctx context.Context, token string, owner, 
 	return attachment, err
 }
 
+// ListAttachments 通过 HTTP 接口查询用户指定类型的所有关联关系列表。
 func (c *HTTPClient) ListAttachments(ctx context.Context, token string, owner UserRef, attachmentType AttachmentType) ([]Attachment, error) {
 	if err := owner.validate(); err != nil {
 		return nil, fmt.Errorf("invalid owner: %w", err)

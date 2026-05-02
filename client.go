@@ -17,10 +17,12 @@ import (
 	pb "github.com/tursom/turntf-go/internal/proto"
 )
 
+// Logger 是日志记录器接口，用于输出客户端内部日志（如重连、错误信息）。
 type Logger interface {
 	Printf(format string, args ...any)
 }
 
+// Handler 是客户端事件处理器接口，用于接收登录成功、消息推送、数据包推送、错误和断开连接等事件。
 type Handler interface {
 	OnLogin(context.Context, LoginInfo)
 	OnMessage(context.Context, Message)
@@ -29,31 +31,56 @@ type Handler interface {
 	OnDisconnect(context.Context, error)
 }
 
+// NopHandler 是 Handler 的空实现，所有方法均为空操作。
+// 当 Config.Handler 未设置时，客户端默认使用 NopHandler。
 type NopHandler struct{}
 
-func (NopHandler) OnLogin(context.Context, LoginInfo)  {}
-func (NopHandler) OnMessage(context.Context, Message)  {}
+// OnLogin 是登录成功事件的空处理器。
+func (NopHandler) OnLogin(context.Context, LoginInfo) {}
+// OnMessage 是消息推送事件的空处理器。
+func (NopHandler) OnMessage(context.Context, Message) {}
+// OnPacket 是数据包推送事件的空处理器。
 func (NopHandler) OnPacket(context.Context, Packet)    {}
+// OnError 是错误事件的空处理器。
 func (NopHandler) OnError(context.Context, error)      {}
+// OnDisconnect 是断开连接事件的空处理器。
 func (NopHandler) OnDisconnect(context.Context, error) {}
 
+// Config 是客户端配置，包含连接、认证、重连、事件处理器等所有可选设置。
+// 创建客户端后可通过 NewClient 初始化，未设置的字段会使用合理的默认值。
 type Config struct {
+	// BaseURL 是服务端基础地址，格式如 "http://localhost:8080"，必填。
 	BaseURL               string
+	// Credentials 是用户登录凭据，必填。
 	Credentials           Credentials
+	// CursorStore 是消息游标持久化存储，用于消息去重。默认为 NewMemoryCursorStore()。
 	CursorStore           CursorStore
+	// Handler 是事件处理器，接收登录、消息、错误等事件。默认为 NopHandler。
 	Handler               Handler
+	// HTTPClient 是 HTTP 客户端实例，用于底层 HTTP 请求。默认为 http.DefaultClient。
 	HTTPClient            *http.Client
+	// Logger 是日志记录器。为空则不输出日志。
 	Logger                Logger
+	// Reconnect 是否启用自动重连，默认为 true。
 	Reconnect             bool
+	// InitialReconnectDelay 首次重连等待时间，默认为 1 秒。
 	InitialReconnectDelay time.Duration
+	// MaxReconnectDelay 最大重连等待时间（指数退避上限），默认为 30 秒。
 	MaxReconnectDelay     time.Duration
+	// PingInterval WebSocket ping 间隔，默认为 30 秒。
 	PingInterval          time.Duration
+	// RequestTimeout RPC 请求超时时间，默认为 10 秒。
 	RequestTimeout        time.Duration
+	// AckMessages 是否自动确认已收到的消息，默认为 true。
 	AckMessages           bool
+	// TransientOnly 是否仅接收瞬时消息（不接收持久化消息推送），默认为 false。
 	TransientOnly         bool
+	// RealtimeStream 是否使用实时流通道（/ws/realtime），默认为 false（使用 /ws/client）。
 	RealtimeStream        bool
 }
 
+// Client 是 WebSocket 客户端，管理与服务端的长连接、消息收发、自动重连和 RPC 请求。
+// 使用 NewClient 创建实例后，通过 Connect 建立连接，通过 Handler 接口接收事件推送。
 type Client struct {
 	cfg Config
 
@@ -89,6 +116,9 @@ type requestResult struct {
 	err   error
 }
 
+// NewClient 创建并返回一个新的 WebSocket Client 实例。
+// cfg 为必填配置，其中 BaseURL 和 Credentials 为必填项。
+// 未设置的可选字段（如 CursorStore、Handler、超时等）将使用合理的默认值。
 func NewClient(cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		return nil, fmt.Errorf("base URL is required")
@@ -133,10 +163,12 @@ func NewClient(cfg Config) (*Client, error) {
 	}, nil
 }
 
+// HTTP 返回关联的 HTTPClient 实例，用于通过 REST API 执行操作。
 func (c *Client) HTTP() *HTTPClient {
 	return c.http
 }
 
+// CurrentLogin 返回当前登录的用户信息。如果尚未登录或已断开连接，第二个返回值为 false。
 func (c *Client) CurrentLogin() (LoginInfo, bool) {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
@@ -146,6 +178,8 @@ func (c *Client) CurrentLogin() (LoginInfo, bool) {
 	return c.loginInfo, true
 }
 
+// Login 使用明文密码通过 HTTP REST API 登录，通过节点 ID 和用户 ID 标识用户。
+// 返回认证 token 用于后续 HTTP 请求的 Bearer 认证。
 func (c *Client) Login(ctx context.Context, nodeID, userID int64, password string) (string, error) {
 	input, err := PlainPassword(password)
 	if err != nil {
@@ -154,18 +188,26 @@ func (c *Client) Login(ctx context.Context, nodeID, userID int64, password strin
 	return c.http.LoginWithPassword(ctx, nodeID, userID, input)
 }
 
+// LoginWithPassword 通过 HTTP REST API 使用 PasswordInput 密码登录，通过节点 ID 和用户 ID 标识用户。
+// password 支持明文和已哈希两种模式。
 func (c *Client) LoginWithPassword(ctx context.Context, nodeID, userID int64, password PasswordInput) (string, error) {
 	return c.http.LoginWithPassword(ctx, nodeID, userID, password)
 }
 
+// LoginByLoginName 通过 HTTP REST API 使用明文密码和登录名登录。
+// loginName 为用户的登录名，而非 node_id + user_id 组合。
 func (c *Client) LoginByLoginName(ctx context.Context, loginName, password string) (string, error) {
 	return c.http.LoginByLoginName(ctx, loginName, password)
 }
 
+// LoginByLoginNameWithPassword 通过 HTTP REST API 使用 PasswordInput 密码和登录名登录。
+// password 支持明文和已哈希两种模式。
 func (c *Client) LoginByLoginNameWithPassword(ctx context.Context, loginName string, password PasswordInput) (string, error) {
 	return c.http.LoginByLoginNameWithPassword(ctx, loginName, password)
 }
 
+// CreateUser 通过 WebSocket RPC 创建用户或频道。
+// token 参数当前未被使用（保留以保持 API 一致），请求通过 WebSocket 连接发送。
 func (c *Client) CreateUser(ctx context.Context, token string, req CreateUserRequest) (User, error) {
 	_ = token
 
@@ -202,6 +244,7 @@ func (c *Client) CreateUser(ctx context.Context, token string, req CreateUserReq
 	return user, nil
 }
 
+// CreateChannel 通过 WebSocket RPC 创建频道。与 CreateUser 类似，但 Role 默认设为 "channel"。
 func (c *Client) CreateChannel(ctx context.Context, token string, req CreateUserRequest) (User, error) {
 	if req.Role == "" {
 		req.Role = "channel"
@@ -209,16 +252,21 @@ func (c *Client) CreateChannel(ctx context.Context, token string, req CreateUser
 	return c.CreateUser(ctx, token, req)
 }
 
+// CreateSubscription 通过 WebSocket RPC 创建频道订阅关系。订阅者将收到频道的消息推送。
 func (c *Client) CreateSubscription(ctx context.Context, token string, userRef, channelRef UserRef) error {
 	_, err := c.UpsertAttachment(ctx, userRef, channelRef, AttachmentTypeChannelSubscription, []byte("{}"))
 	return err
 }
 
+// ListMessages 通过 WebSocket RPC 查询指定用户的消息列表。
+// target 指定消息所属用户，limit 控制返回数量上限。
 func (c *Client) ListMessages(ctx context.Context, token string, target UserRef, limit int) ([]Message, error) {
 	_ = token
 	return c.WSListMessages(ctx, target, limit)
 }
 
+// PostMessage 通过 WebSocket RPC 向目标用户发送持久化消息。
+// body 为消息内容，不能为空。返回已保存的消息详情。
 func (c *Client) PostMessage(ctx context.Context, token string, target UserRef, body []byte) (Message, error) {
 	_ = token
 	return c.SendMessage(ctx, SendMessageInput{
@@ -227,6 +275,8 @@ func (c *Client) PostMessage(ctx context.Context, token string, target UserRef, 
 	})
 }
 
+// PostPacket 通过 WebSocket RPC 发送瞬时消息（非持久化）。
+// relayTarget 为目标用户，mode 为投递模式。targetNodeID 必须与 relayTarget.NodeID 一致。
 func (c *Client) PostPacket(ctx context.Context, token string, targetNodeID int64, relayTarget UserRef, body []byte, mode DeliveryMode) error {
 	_ = token
 	if targetNodeID != 0 && targetNodeID != relayTarget.NodeID {
@@ -240,26 +290,32 @@ func (c *Client) PostPacket(ctx context.Context, token string, targetNodeID int6
 	return err
 }
 
+// GetUserMetadata 通过 WebSocket RPC 获取指定用户的指定元数据键值。
 func (c *Client) GetUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
 	_ = token
 	return c.WSGetUserMetadata(ctx, owner, key)
 }
 
+// UpsertUserMetadata 通过 WebSocket RPC 创建或更新用户元数据。
 func (c *Client) UpsertUserMetadata(ctx context.Context, token string, owner UserRef, key string, req UpsertUserMetadataRequest) (UserMetadata, error) {
 	_ = token
 	return c.WSUpsertUserMetadata(ctx, owner, key, req)
 }
 
+// DeleteUserMetadata 通过 WebSocket RPC 删除用户元数据（软删除）。
 func (c *Client) DeleteUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
 	_ = token
 	return c.WSDeleteUserMetadata(ctx, owner, key)
 }
 
+// ScanUserMetadata 通过 WebSocket RPC 按前缀分页扫描用户元数据。
 func (c *Client) ScanUserMetadata(ctx context.Context, token string, owner UserRef, req ScanUserMetadataRequest) (UserMetadataPage, error) {
 	_ = token
 	return c.WSScanUserMetadata(ctx, owner, req)
 }
 
+// Connect 启动 WebSocket 连接并阻塞等待首次连接成功或失败。
+// 首次连接成功后，客户端会自动处理重连（如果配置启用）。ctx 可用于超时控制。
 func (c *Client) Connect(ctx context.Context) error {
 	c.startOnce.Do(func() {
 		c.started.Store(true)
@@ -274,6 +330,8 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 }
 
+// Close 关闭客户端，断开 WebSocket 连接并停止重连。
+// 方法会等待所有内部 goroutine 退出后返回。已关闭的客户端可安全重复调用。
 func (c *Client) Close() error {
 	started := c.started.Load()
 	c.stateMu.Lock()
@@ -301,6 +359,8 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// Ping 发送 WebSocket ping 请求给服务端，用于检测连接活性。
+// 返回服务端的响应错误（如果有）。
 func (c *Client) Ping(ctx context.Context) error {
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
 		return &pb.ClientEnvelope{
@@ -315,6 +375,8 @@ func (c *Client) Ping(ctx context.Context) error {
 	return res.err
 }
 
+// SendMessage 通过 WebSocket RPC 发送持久化消息。消息会被存储并按可靠投递机制投递。
+// input 包含目标用户和消息体。返回已保存的消息详情。
 func (c *Client) SendMessage(ctx context.Context, input SendMessageInput) (Message, error) {
 	var zero Message
 	if err := input.Target.validate(); err != nil {
@@ -348,6 +410,9 @@ func (c *Client) SendMessage(ctx context.Context, input SendMessageInput) (Messa
 	return msg, nil
 }
 
+// SendPacket 通过 WebSocket RPC 发送瞬时消息（非持久化）。
+// 与 SendMessage 不同，Packet 不会被存储，适合心跳、通知等场景。
+// input 包含目标用户、消息体、投递模式和可选的会话定位信息。
 func (c *Client) SendPacket(ctx context.Context, input SendPacketInput) (RelayAccepted, error) {
 	var zero RelayAccepted
 	if err := input.Target.validate(); err != nil {
@@ -392,6 +457,8 @@ func (c *Client) SendPacket(ctx context.Context, input SendPacketInput) (RelayAc
 	return relay, nil
 }
 
+// SendPacketToSession 通过 WebSocket RPC 发送瞬时消息到用户的指定会话。
+// 与 SendPacket 类似，但明确指定了目标会话。
 func (c *Client) SendPacketToSession(ctx context.Context, target UserRef, targetSession SessionRef, body []byte, mode DeliveryMode) (RelayAccepted, error) {
 	return c.SendPacket(ctx, SendPacketInput{
 		Target:        target,
@@ -401,6 +468,7 @@ func (c *Client) SendPacketToSession(ctx context.Context, target UserRef, target
 	})
 }
 
+// GetUser 通过 WebSocket RPC 查询指定用户的详细信息。
 func (c *Client) GetUser(ctx context.Context, target UserRef) (User, error) {
 	var zero User
 	if err := target.validate(); err != nil {
@@ -428,6 +496,8 @@ func (c *Client) GetUser(ctx context.Context, target UserRef) (User, error) {
 	return user, nil
 }
 
+// UpdateUser 通过 WebSocket RPC 更新用户信息。仅传递 req 中非 nil 的字段进行更新。
+// 部分字段的修改需要额外权限验证。
 func (c *Client) UpdateUser(ctx context.Context, target UserRef, req UpdateUserRequest) (User, error) {
 	var zero User
 	if err := target.validate(); err != nil {
@@ -460,6 +530,7 @@ func (c *Client) UpdateUser(ctx context.Context, target UserRef, req UpdateUserR
 	return user, nil
 }
 
+// DeleteUser 通过 WebSocket RPC 删除指定用户。
 func (c *Client) DeleteUser(ctx context.Context, target UserRef) (DeleteUserResult, error) {
 	var zero DeleteUserResult
 	if err := target.validate(); err != nil {
@@ -487,6 +558,8 @@ func (c *Client) DeleteUser(ctx context.Context, target UserRef) (DeleteUserResu
 	return result, nil
 }
 
+// WSGetUserMetadata 通过 WebSocket RPC 获取指定用户的指定元数据键值。
+// 与 GetUserMetadata 功能相同，但直接调用 WebSocket 底层方法。
 func (c *Client) WSGetUserMetadata(ctx context.Context, owner UserRef, key string) (UserMetadata, error) {
 	var zero UserMetadata
 	if err := owner.validate(); err != nil {
@@ -518,6 +591,8 @@ func (c *Client) WSGetUserMetadata(ctx context.Context, owner UserRef, key strin
 	return metadata, nil
 }
 
+// WSUpsertUserMetadata 通过 WebSocket RPC 创建或更新用户元数据。
+// 与 UpsertUserMetadata 功能相同，但直接调用 WebSocket 底层方法。
 func (c *Client) WSUpsertUserMetadata(ctx context.Context, owner UserRef, key string, req UpsertUserMetadataRequest) (UserMetadata, error) {
 	var zero UserMetadata
 	if err := owner.validate(); err != nil {
@@ -551,6 +626,8 @@ func (c *Client) WSUpsertUserMetadata(ctx context.Context, owner UserRef, key st
 	return metadata, nil
 }
 
+// WSDeleteUserMetadata 通过 WebSocket RPC 删除用户元数据（软删除）。
+// 与 DeleteUserMetadata 功能相同，但直接调用 WebSocket 底层方法。
 func (c *Client) WSDeleteUserMetadata(ctx context.Context, owner UserRef, key string) (UserMetadata, error) {
 	var zero UserMetadata
 	if err := owner.validate(); err != nil {
@@ -582,6 +659,8 @@ func (c *Client) WSDeleteUserMetadata(ctx context.Context, owner UserRef, key st
 	return metadata, nil
 }
 
+// WSScanUserMetadata 通过 WebSocket RPC 按前缀分页扫描用户元数据。
+// 与 ScanUserMetadata 功能相同，但直接调用 WebSocket 底层方法。
 func (c *Client) WSScanUserMetadata(ctx context.Context, owner UserRef, req ScanUserMetadataRequest) (UserMetadataPage, error) {
 	var zero UserMetadataPage
 	if err := owner.validate(); err != nil {
@@ -620,6 +699,7 @@ func (c *Client) WSScanUserMetadata(ctx context.Context, owner UserRef, req Scan
 	return page, nil
 }
 
+// UpsertAttachment 通过 WebSocket RPC 创建或更新用户之间的关联关系（如频道订阅、黑名单等）。
 func (c *Client) UpsertAttachment(ctx context.Context, owner, subject UserRef, attachmentType AttachmentType, configJSON []byte) (Attachment, error) {
 	var zero Attachment
 	if err := owner.validate(); err != nil {
@@ -651,6 +731,7 @@ func (c *Client) UpsertAttachment(ctx context.Context, owner, subject UserRef, a
 	return attachment, nil
 }
 
+// DeleteAttachment 通过 WebSocket RPC 删除用户之间的关联关系。
 func (c *Client) DeleteAttachment(ctx context.Context, owner, subject UserRef, attachmentType AttachmentType) (Attachment, error) {
 	var zero Attachment
 	if err := owner.validate(); err != nil {
@@ -681,6 +762,7 @@ func (c *Client) DeleteAttachment(ctx context.Context, owner, subject UserRef, a
 	return attachment, nil
 }
 
+// ListAttachments 通过 WebSocket RPC 查询用户指定类型的所有关联关系列表。
 func (c *Client) ListAttachments(ctx context.Context, owner UserRef, attachmentType AttachmentType) ([]Attachment, error) {
 	if err := owner.validate(); err != nil {
 		return nil, fmt.Errorf("invalid owner: %w", err)
@@ -706,6 +788,7 @@ func (c *Client) ListAttachments(ctx context.Context, owner UserRef, attachmentT
 	return items, nil
 }
 
+// SubscribeChannel 通过 WebSocket RPC 订阅频道。订阅者将收到频道的消息推送。
 func (c *Client) SubscribeChannel(ctx context.Context, token string, subscriber, channel UserRef) (Subscription, error) {
 	_ = token
 	attachment, err := c.UpsertAttachment(ctx, subscriber, channel, AttachmentTypeChannelSubscription, []byte("{}"))
@@ -721,6 +804,7 @@ func (c *Client) SubscribeChannel(ctx context.Context, token string, subscriber,
 	}), nil
 }
 
+// UnsubscribeChannel 通过 WebSocket RPC 取消频道订阅。
 func (c *Client) UnsubscribeChannel(ctx context.Context, subscriber, channel UserRef) (Subscription, error) {
 	attachment, err := c.DeleteAttachment(ctx, subscriber, channel, AttachmentTypeChannelSubscription)
 	if err != nil {
@@ -735,6 +819,7 @@ func (c *Client) UnsubscribeChannel(ctx context.Context, subscriber, channel Use
 	}), nil
 }
 
+// ListSubscriptions 通过 WebSocket RPC 查询指定用户的所有频道订阅。
 func (c *Client) ListSubscriptions(ctx context.Context, subscriber UserRef) ([]Subscription, error) {
 	attachments, err := c.ListAttachments(ctx, subscriber, AttachmentTypeChannelSubscription)
 	if err != nil {
@@ -753,6 +838,7 @@ func (c *Client) ListSubscriptions(ctx context.Context, subscriber UserRef) ([]S
 	return items, nil
 }
 
+// BlockUser 通过 WebSocket RPC 将指定用户加入黑名单。被拉黑的用户无法向 owner 发送消息。
 func (c *Client) BlockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
 	_ = token
 	attachment, err := c.UpsertAttachment(ctx, owner, blocked, AttachmentTypeUserBlacklist, []byte("{}"))
@@ -768,6 +854,7 @@ func (c *Client) BlockUser(ctx context.Context, token string, owner, blocked Use
 	}), nil
 }
 
+// UnblockUser 通过 WebSocket RPC 将指定用户移出黑名单。
 func (c *Client) UnblockUser(ctx context.Context, token string, owner, blocked UserRef) (BlacklistEntry, error) {
 	_ = token
 	attachment, err := c.DeleteAttachment(ctx, owner, blocked, AttachmentTypeUserBlacklist)
@@ -783,6 +870,7 @@ func (c *Client) UnblockUser(ctx context.Context, token string, owner, blocked U
 	}), nil
 }
 
+// ListBlockedUsers 通过 WebSocket RPC 查询指定用户的黑名单列表。
 func (c *Client) ListBlockedUsers(ctx context.Context, token string, owner UserRef) ([]BlacklistEntry, error) {
 	_ = token
 	attachments, err := c.ListAttachments(ctx, owner, AttachmentTypeUserBlacklist)
@@ -802,6 +890,8 @@ func (c *Client) ListBlockedUsers(ctx context.Context, token string, owner UserR
 	return items, nil
 }
 
+// WSListMessages 通过 WebSocket RPC 查询指定用户的消息列表。
+// 与 ListMessages 功能相同，但直接调用 WebSocket 底层方法。
 func (c *Client) WSListMessages(ctx context.Context, target UserRef, limit int) ([]Message, error) {
 	if err := target.validate(); err != nil {
 		return nil, fmt.Errorf("invalid target: %w", err)
@@ -829,6 +919,8 @@ func (c *Client) WSListMessages(ctx context.Context, target UserRef, limit int) 
 	return items, nil
 }
 
+// ListEvents 通过 WebSocket RPC 查询事件日志，从指定序列号之后开始拉取。
+// after 为起始事件序列号（不包含），limit 控制返回数量上限。
 func (c *Client) ListEvents(ctx context.Context, after int64, limit int) ([]Event, error) {
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
 		return &pb.ClientEnvelope{
@@ -852,6 +944,7 @@ func (c *Client) ListEvents(ctx context.Context, after int64, limit int) ([]Even
 	return items, nil
 }
 
+// ListClusterNodes 通过 WebSocket RPC 查询集群中的所有节点列表。
 func (c *Client) ListClusterNodes(ctx context.Context) ([]ClusterNode, error) {
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
 		return &pb.ClientEnvelope{
@@ -871,6 +964,7 @@ func (c *Client) ListClusterNodes(ctx context.Context) ([]ClusterNode, error) {
 	return items, nil
 }
 
+// ListNodeLoggedInUsers 通过 WebSocket RPC 查询指定节点上当前已登录的用户列表。
 func (c *Client) ListNodeLoggedInUsers(ctx context.Context, nodeID int64) ([]LoggedInUser, error) {
 	if nodeID == 0 {
 		return nil, fmt.Errorf("node_id is required")
@@ -897,6 +991,7 @@ func (c *Client) ListNodeLoggedInUsers(ctx context.Context, nodeID int64) ([]Log
 	return items, nil
 }
 
+// ResolveUserSessions 通过 WebSocket RPC 查询用户的所有在线节点存在性和会话列表。
 func (c *Client) ResolveUserSessions(ctx context.Context, user UserRef) (ResolvedUserSessions, error) {
 	var zero ResolvedUserSessions
 	if err := user.validate(); err != nil {
@@ -924,6 +1019,7 @@ func (c *Client) ResolveUserSessions(ctx context.Context, user UserRef) (Resolve
 	return sessions, nil
 }
 
+// OperationsStatus 通过 WebSocket RPC 查询服务节点的运维状态，包括消息窗口、事件序列、写入门控、冲突统计等。
 func (c *Client) OperationsStatus(ctx context.Context) (OperationsStatus, error) {
 	var zero OperationsStatus
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
@@ -944,6 +1040,7 @@ func (c *Client) OperationsStatus(ctx context.Context) (OperationsStatus, error)
 	return status, nil
 }
 
+// Metrics 通过 WebSocket RPC 查询服务端 Prometheus 格式的监控指标。
 func (c *Client) Metrics(ctx context.Context) (string, error) {
 	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
 		return &pb.ClientEnvelope{

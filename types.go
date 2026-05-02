@@ -8,6 +8,8 @@ import (
 	pb "github.com/tursom/turntf-go/internal/proto"
 )
 
+// Credentials 封装客户端登录凭据，支持通过 (NodeID, UserID) 或 LoginName 两种方式标识用户。
+// 两种方式互斥，必须且只能选择一种。Password 必须通过 PlainPassword 或 HashedPassword 构建。
 type Credentials struct {
 	NodeID    int64
 	UserID    int64
@@ -15,16 +17,22 @@ type Credentials struct {
 	Password  PasswordInput
 }
 
+// UserRef 标识一个用户，由节点 ID 和用户 ID 组成。
+// 在调用 API 时，UserRef 的两个字段都必须非零。
 type UserRef struct {
 	NodeID int64 `json:"node_id"`
 	UserID int64 `json:"user_id"`
 }
 
+// SessionRef 标识一个用户会话，由服务节点 ID 和会话 ID 组成。
+// 用于将消息定向投递到特定会话（而非用户的所有会话）。
 type SessionRef struct {
 	ServingNodeID int64  `json:"serving_node_id"`
 	SessionID     string `json:"session_id"`
 }
 
+// User 表示一个用户或频道，包含用户在系统中的完整信息。
+// 用户通过 node_id + user_id 唯一确定，也可通过 login_name 登录。
 type User struct {
 	NodeID         int64  `json:"node_id"`
 	UserID         int64  `json:"user_id"`
@@ -38,23 +46,31 @@ type User struct {
 	OriginNodeID   int64  `json:"origin_node_id"`
 }
 
+// MessageCursor 标识一个消息的位置，由消息所在节点 ID 和序列号组成。
+// 用于消息去重、ACK 确认和断线重连时的消息恢复。
 type MessageCursor struct {
 	NodeID int64 `json:"node_id"`
 	Seq    int64 `json:"seq"`
 }
 
+// DeliveryMode 表示瞬时消息（Packet）的投递模式。
 type DeliveryMode string
 
 const (
+	// DeliveryModeUnspecified 表示未指定投递模式，使用服务端默认策略。
 	DeliveryModeUnspecified DeliveryMode = ""
-	DeliveryModeBestEffort  DeliveryMode = "best_effort"
-	DeliveryModeRouteRetry  DeliveryMode = "route_retry"
+	// DeliveryModeBestEffort 表示尽最大努力投递模式。消息尽力投递，但不保证可靠性。
+	DeliveryModeBestEffort DeliveryMode = "best_effort"
+	// DeliveryModeRouteRetry 表示路由重试模式。如果目标节点不可达，会持续重试投递。
+	DeliveryModeRouteRetry DeliveryMode = "route_retry"
 )
 
 const maxUserMetadataLimit = 1000
 
 var metadataKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 
+// Message 表示一条已持久化的消息，包含发送者、接收者、消息体和 HLC 时间戳。
+// 消息通过 (NodeID, Seq) 唯一标识。
 type Message struct {
 	Recipient    UserRef `json:"recipient"`
 	NodeID       int64   `json:"node_id"`
@@ -64,6 +80,8 @@ type Message struct {
 	CreatedAtHLC string  `json:"created_at_hlc"`
 }
 
+// Packet 表示一条瞬时消息（非持久化），包含投递模式和可选的目标会话信息。
+// 区别于持久化的 Message，Packet 不会被存储，适合心跳、通知等场景。
 type Packet struct {
 	PacketID      uint64       `json:"packet_id"`
 	SourceNodeID  int64        `json:"source_node_id"`
@@ -75,6 +93,7 @@ type Packet struct {
 	TargetSession SessionRef   `json:"target_session"`
 }
 
+// RelayAccepted 表示瞬时消息已被服务端接受并准备转发，包含转发目标信息。
 type RelayAccepted struct {
 	PacketID      uint64       `json:"packet_id"`
 	SourceNodeID  int64        `json:"source_node_id"`
@@ -84,15 +103,22 @@ type RelayAccepted struct {
 	TargetSession SessionRef   `json:"target_session"`
 }
 
+// AttachmentType 表示附件（关联关系）的类型。
 type AttachmentType string
 
 const (
-	AttachmentTypeChannelManager      AttachmentType = "channel_manager"
-	AttachmentTypeChannelWriter       AttachmentType = "channel_writer"
+	// AttachmentTypeChannelManager 表示频道管理员，拥有频道管理权限。
+	AttachmentTypeChannelManager AttachmentType = "channel_manager"
+	// AttachmentTypeChannelWriter 表示频道写入者，拥有向频道发消息的权限。
+	AttachmentTypeChannelWriter AttachmentType = "channel_writer"
+	// AttachmentTypeChannelSubscription 表示频道订阅关系，订阅者可以收到频道的消息推送。
 	AttachmentTypeChannelSubscription AttachmentType = "channel_subscription"
-	AttachmentTypeUserBlacklist       AttachmentType = "user_blacklist"
+	// AttachmentTypeUserBlacklist 表示用户黑名单，被拉黑的用户无法发送消息。
+	AttachmentTypeUserBlacklist AttachmentType = "user_blacklist"
 )
 
+// Attachment 表示两个用户之间的关联关系，如频道订阅、黑名单、频道管理员等。
+// 通过 AttachmentType 区分不同的关系类型，通过 Owner 和 Subject 标识关系的双方。
 type Attachment struct {
 	Owner          UserRef        `json:"owner"`
 	Subject        UserRef        `json:"subject"`
@@ -103,6 +129,8 @@ type Attachment struct {
 	OriginNodeID   int64          `json:"origin_node_id"`
 }
 
+// Subscription 表示用户（Subscriber）对频道（Channel）的订阅关系。
+// 订阅者可以收到频道的消息推送。注意：Subscription 是 Attachment 的语义封装。
 type Subscription struct {
 	Subscriber   UserRef `json:"subscriber"`
 	Channel      UserRef `json:"channel"`
@@ -111,6 +139,8 @@ type Subscription struct {
 	OriginNodeID int64   `json:"origin_node_id"`
 }
 
+// BlacklistEntry 表示用户黑名单条目。Owner 将 Blocked 用户拉黑后，
+// Blocked 用户将无法向 Owner 发送消息。
 type BlacklistEntry struct {
 	Owner        UserRef `json:"owner"`
 	Blocked      UserRef `json:"blocked"`
@@ -119,6 +149,8 @@ type BlacklistEntry struct {
 	OriginNodeID int64   `json:"origin_node_id"`
 }
 
+// UserMetadata 表示用户的自定义元数据键值对，支持过期时间设置。
+// 元数据用于存储用户维度的配置信息、状态等轻量数据。
 type UserMetadata struct {
 	Owner        UserRef `json:"owner"`
 	Key          string  `json:"key"`
@@ -129,23 +161,29 @@ type UserMetadata struct {
 	OriginNodeID int64   `json:"origin_node_id"`
 }
 
+// UpsertUserMetadataRequest 是创建或更新用户元数据的请求参数。
+// Value 为新的元数据值（字节数组），ExpiresAt 为可选过期时间（RFC3339 格式字符串）。
 type UpsertUserMetadataRequest struct {
 	Value     []byte  `json:"value"`
 	ExpiresAt *string `json:"expires_at,omitempty"`
 }
 
+// ScanUserMetadataRequest 是按前缀分页扫描用户元数据的请求参数。
+// Prefix 为键的前缀过滤条件，After 为分页游标，Limit 为每页返回数量（最大 1000）。
 type ScanUserMetadataRequest struct {
 	Prefix string `json:"prefix,omitempty"`
 	After  string `json:"after,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
 }
 
+// UserMetadataPage 是用户元数据扫描结果的分页数据，包含元数据列表和下一页游标。
 type UserMetadataPage struct {
 	Items     []UserMetadata `json:"items"`
 	Count     int            `json:"count"`
 	NextAfter string         `json:"next_after,omitempty"`
 }
 
+// Event 表示领域事件，用于事件溯源和跨节点数据同步。
 type Event struct {
 	Sequence        int64  `json:"sequence"`
 	EventID         int64  `json:"event_id"`
@@ -158,6 +196,7 @@ type Event struct {
 	EventJSON       []byte `json:"event_json,omitempty"`
 }
 
+// ClusterNode 表示集群中的一个节点信息。
 type ClusterNode struct {
 	NodeID        int64  `json:"node_id"`
 	IsLocal       bool   `json:"is_local"`
@@ -165,6 +204,7 @@ type ClusterNode struct {
 	Source        string `json:"source,omitempty"`
 }
 
+// LoggedInUser 表示节点上当前已登录的用户信息，用于查看节点在线用户。
 type LoggedInUser struct {
 	NodeID    int64  `json:"node_id"`
 	UserID    int64  `json:"user_id"`
@@ -172,34 +212,40 @@ type LoggedInUser struct {
 	LoginName string `json:"login_name"`
 }
 
+// OnlineNodePresence 表示用户在某个服务节点上的在线存在性信息，包含会话数量和传输方式。
 type OnlineNodePresence struct {
 	ServingNodeID int64  `json:"serving_node_id"`
 	SessionCount  int32  `json:"session_count"`
 	TransportHint string `json:"transport_hint,omitempty"`
 }
 
+// ResolvedSession 表示用户的一个在线会话详情，包含会话引用、传输协议和是否支持瞬时消息。
 type ResolvedSession struct {
 	Session          SessionRef `json:"session"`
 	Transport        string     `json:"transport,omitempty"`
 	TransientCapable bool       `json:"transient_capable"`
 }
 
+// ResolvedUserSessions 表示用户的完整在线状态，包含节点存在性信息和所有活跃会话列表。
 type ResolvedUserSessions struct {
 	User     UserRef              `json:"user"`
 	Presence []OnlineNodePresence `json:"presence,omitempty"`
 	Sessions []ResolvedSession    `json:"sessions,omitempty"`
 }
 
+// MessageTrimStatus 表示消息修剪操作的统计状态。
 type MessageTrimStatus struct {
 	TrimmedTotal  int64  `json:"trimmed_total"`
 	LastTrimmedAt string `json:"last_trimmed_at,omitempty"`
 }
 
+// ProjectionStatus 表示事件投影（Projection）的处理状态。
 type ProjectionStatus struct {
 	PendingTotal int64  `json:"pending_total"`
 	LastFailedAt string `json:"last_failed_at,omitempty"`
 }
 
+// PeerOriginStatus 表示对等节点上某个数据源（Origin）的同步状态。
 type PeerOriginStatus struct {
 	OriginNodeID      int64  `json:"origin_node_id"`
 	AckedEventID      int64  `json:"acked_event_id"`
@@ -210,6 +256,7 @@ type PeerOriginStatus struct {
 	PendingCatchup    bool   `json:"pending_catchup"`
 }
 
+// PeerStatus 表示集群中对等节点的连接和同步状态。
 type PeerStatus struct {
 	NodeID                    int64              `json:"node_id"`
 	ConfiguredURL             string             `json:"configured_url,omitempty"`
@@ -235,6 +282,8 @@ type PeerStatus struct {
 	LastSnapshotChunkAt       string             `json:"last_snapshot_chunk_at,omitempty"`
 }
 
+// OperationsStatus 表示服务节点的运维状态，包括消息窗口、事件序列、写入门控、冲突统计、
+// 消息修剪、投影进度以及集群对等节点状态等综合信息。
 type OperationsStatus struct {
 	NodeID            int64             `json:"node_id"`
 	MessageWindowSize int32             `json:"message_window_size"`
@@ -246,22 +295,29 @@ type OperationsStatus struct {
 	Peers             []PeerStatus      `json:"peers,omitempty"`
 }
 
+// DeleteUserResult 表示删除用户操作的结果，包含操作状态和被删除用户的引用。
 type DeleteUserResult struct {
 	Status string  `json:"status"`
 	User   UserRef `json:"user"`
 }
 
+// LoginInfo 表示登录成功后的信息，包括当前用户信息、协议版本和当前会话引用。
 type LoginInfo struct {
 	User            User
 	ProtocolVersion string
 	SessionRef      SessionRef
 }
 
+// SendMessageInput 是发送持久化消息的请求参数。
+// Target 指定消息接收者，Body 为消息内容的字节数组。
 type SendMessageInput struct {
 	Target UserRef
 	Body   []byte
 }
 
+// SendPacketInput 是发送瞬时消息（Packet）的请求参数。
+// Target 指定消息接收者，Body 为消息内容，DeliveryMode 指定投递模式，
+// TargetSession 可选，指定目标会话（空值表示投递到所有会话）。
 type SendPacketInput struct {
 	Target        UserRef
 	Body          []byte
@@ -269,6 +325,8 @@ type SendPacketInput struct {
 	TargetSession SessionRef
 }
 
+// CreateUserRequest 是创建用户或频道的请求参数。
+// 创建用户时，Username 和 Role 为必填；Password 可选（频道用户不需要密码）。
 type CreateUserRequest struct {
 	Username    string        `json:"username"`
 	LoginName   string        `json:"login_name,omitempty"`
@@ -277,6 +335,8 @@ type CreateUserRequest struct {
 	Role        string        `json:"role"`
 }
 
+// UpdateUserRequest 是更新用户的请求参数，所有字段均为可选（指针类型）。
+// nil 表示不更新该字段，非 nil 表示更新为指定值。密码更新使用 *PasswordInput 类型。
 type UpdateUserRequest struct {
 	Username    *string        `json:"username,omitempty"`
 	LoginName   *string        `json:"login_name,omitempty"`
@@ -285,6 +345,7 @@ type UpdateUserRequest struct {
 	Role        *string        `json:"role,omitempty"`
 }
 
+// Cursor 返回该消息的游标，由消息所在节点 ID 和序列号组成，用于消息去重和 ACK 确认。
 func (m Message) Cursor() MessageCursor {
 	return MessageCursor{NodeID: m.NodeID, Seq: m.Seq}
 }
@@ -324,6 +385,7 @@ func (c Credentials) loginSelector() (*pb.UserRef, string) {
 	return userRefToProto(UserRef{NodeID: c.NodeID, UserID: c.UserID}), ""
 }
 
+// HasMore 判断分页结果中是否还有更多数据（NextAfter 不为空）。
 func (p UserMetadataPage) HasMore() bool {
 	return p.NextAfter != ""
 }
@@ -377,10 +439,12 @@ func (r ScanUserMetadataRequest) validate() error {
 	return nil
 }
 
+// IsZero 判断 SessionRef 是否为空（未设置任何值）。
 func (r SessionRef) IsZero() bool {
 	return r.ServingNodeID == 0 && r.SessionID == ""
 }
 
+// Valid 判断 SessionRef 是否有效（ServingNodeID 和 SessionID 均非空）。
 func (r SessionRef) Valid() bool {
 	return r.ServingNodeID != 0 && r.SessionID != ""
 }
