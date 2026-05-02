@@ -18,6 +18,8 @@ if ! command -v protoc-gen-go >/dev/null 2>&1; then
 fi
 
 protoc \
+  --proto_path=proto \
   --go_out=. \
   --go_opt=module=github.com/tursom/turntf-go \
-  proto/client.proto
+  client.proto \
+  relay.proto

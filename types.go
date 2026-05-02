@@ -325,6 +325,128 @@ type SendPacketInput struct {
 	TargetSession SessionRef
 }
 
+// Reliability 表示 RelayConnection 的可靠性等级。
+type Reliability int32
+
+const (
+	// ReliabilityBestEffort 无 ACK，无重传，无去重，无排序。延迟最低，适合实时音视频帧。
+	ReliabilityBestEffort Reliability = 0
+	// ReliabilityAtLeastOnce ACK + 重传，不保证去重和排序。适合幂等指令。
+	ReliabilityAtLeastOnce Reliability = 1
+	// ReliabilityReliableOrdered ACK + 重传 + 去重 + 严格有序。适合文件传输和聊天消息。
+	ReliabilityReliableOrdered Reliability = 2
+)
+
+// RelayState 表示 RelayConnection 的当前状态。
+type RelayState int32
+
+const (
+	// RelayStateClosed 初始状态或已关闭。
+	RelayStateClosed RelayState = 0
+	// RelayStateOpening 已发送 OPEN，等待 OPEN_ACK。
+	RelayStateOpening RelayState = 1
+	// RelayStateOpen 连接已建立，可收发数据。
+	RelayStateOpen RelayState = 2
+	// RelayStateClosing 已发送 CLOSE，等待确认。
+	RelayStateClosing RelayState = 3
+)
+
+// RelayKind 是 relay 协议帧的类型枚举，对应 proto RelayKind。
+type RelayKind int32
+
+const (
+	RelayKindUnspecified RelayKind = 0
+	RelayKindOpen        RelayKind = 1
+	RelayKindOpenAck     RelayKind = 2
+	RelayKindData        RelayKind = 3
+	RelayKindAck         RelayKind = 4
+	RelayKindClose       RelayKind = 5
+	RelayKindPing        RelayKind = 6
+	RelayKindError       RelayKind = 7
+)
+
+// RelayConfig 是 RelayConnection 的配置。
+type RelayConfig struct {
+	// Reliability 可靠性等级，默认 ReliabilityReliableOrdered。
+	Reliability Reliability
+	// WindowSize 发送窗口大小（在途未确认帧数上限），范围 1-256，默认 16。
+	// BestEffort 模式下忽略此配置。
+	WindowSize int
+	// OpenTimeoutMs OPEN 等待 OPEN_ACK 超时毫秒数，默认 10000。
+	OpenTimeoutMs int64
+	// CloseTimeoutMs CLOSE 等待确认超时毫秒数，默认 5000。
+	CloseTimeoutMs int64
+	// AckTimeoutMs DATA 等待 ACK 超时毫秒数，默认 3000。
+	// BestEffort 模式下忽略此配置。
+	AckTimeoutMs int64
+	// MaxRetransmits 最大重传次数，默认 5。
+	// BestEffort 模式下忽略此配置。
+	MaxRetransmits int
+	// IdleTimeoutMs 无数据超时断开毫秒数，0 表示不超时。
+	IdleTimeoutMs int64
+	// SendTimeoutMs Send 操作超时毫秒数（窗口或缓冲区满时等待上限），0 表示不超时。
+	SendTimeoutMs int64
+	// ReceiveTimeoutMs Receive 操作超时毫秒数（无数据等待上限），0 表示不超时。
+	ReceiveTimeoutMs int64
+	// SendBufferSize 发送缓冲区字节数，默认 65536。
+	SendBufferSize int
+	// DeliveryMode Packet 投递模式，默认 DeliveryModeRouteRetry。
+	DeliveryMode DeliveryMode
+}
+
+// DefaultRelayConfig 返回带默认值的 RelayConfig。
+func DefaultRelayConfig() RelayConfig {
+	return RelayConfig{
+		Reliability:      ReliabilityReliableOrdered,
+		WindowSize:       16,
+		OpenTimeoutMs:    10000,
+		CloseTimeoutMs:   5000,
+		AckTimeoutMs:     3000,
+		MaxRetransmits:   5,
+		SendTimeoutMs:    0,
+		ReceiveTimeoutMs: 0,
+		SendBufferSize:   65536,
+		DeliveryMode:     DeliveryModeRouteRetry,
+	}
+}
+
+// RelayEnvelope 是 relay 协议的帧类型，与 proto RelayEnvelope 对应。
+type RelayEnvelope struct {
+	RelayID        string
+	Kind           RelayKind
+	SenderSession  SessionRef
+	TargetSession  SessionRef
+	Seq            uint64
+	AckSeq         uint64
+	Payload        []byte
+	SentAtMs       int64
+}
+
+// RelayError 表示 relay 层的错误。
+type RelayError struct {
+	Code    string
+	Message string
+}
+
+func (e *RelayError) Error() string {
+	return "relay: " + e.Code + ": " + e.Message
+}
+
+// relay 错误码
+const (
+	RelayErrorOpenTimeout    = "open_timeout"
+	RelayErrorAckTimeout     = "ack_timeout"
+	RelayErrorMaxRetransmit  = "max_retransmit"
+	RelayErrorIdleTimeout    = "idle_timeout"
+	RelayErrorRemoteClose    = "remote_close"
+	RelayErrorClientClosed   = "client_closed"
+	RelayErrorProtocol       = "protocol_error"
+	RelayErrorDuplicateOpen  = "duplicate_open"
+	RelayErrorNotConnected   = "not_connected"
+	RelayErrorSendTimeout    = "send_timeout"
+	RelayErrorReceiveTimeout = "receive_timeout"
+)
+
 // CreateUserRequest 是创建用户或频道的请求参数。
 // 创建用户时，Username 和 Role 为必填；Password 可选（频道用户不需要密码）。
 type CreateUserRequest struct {

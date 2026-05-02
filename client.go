@@ -109,6 +109,9 @@ type Client struct {
 	pending   map[uint64]chan requestResult
 
 	requestID atomic.Uint64
+
+	relay     *Relay
+	relayOnce sync.Once
 }
 
 type requestResult struct {
@@ -1248,7 +1251,11 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 		}
 		c.cfg.Handler.OnMessage(c.ctx, msg)
 	case *pb.ServerEnvelope_PacketPushed:
-		c.cfg.Handler.OnPacket(c.ctx, packetFromProto(body.PacketPushed.Packet))
+		pkt := packetFromProto(body.PacketPushed.Packet)
+			if c.relay != nil && c.relay.handlePacket(pkt) {
+				return nil
+			}
+			c.cfg.Handler.OnPacket(c.ctx, pkt)
 	case *pb.ServerEnvelope_SendMessageResponse:
 		res := requestResult{}
 		switch inner := body.SendMessageResponse.Body.(type) {
