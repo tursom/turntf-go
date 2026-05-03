@@ -663,6 +663,110 @@ func TestClientListClusterQueries(t *testing.T) {
 	}
 }
 
+func TestClientListUsersRPC(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		_ = mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", LoginName: "alice.login", Role: "user"},
+					ProtocolVersion: "client-v1alpha2",
+				},
+			},
+		})
+
+		listReq := mustReadClientEnvelope(t, conn)
+		if listReq.GetListUsers().GetRequestId() == 0 {
+			t.Fatal("expected request_id for list_users")
+		}
+		if listReq.GetListUsers().GetName() != "" {
+			t.Fatalf("unexpected unfiltered list_users name: %q", listReq.GetListUsers().GetName())
+		}
+		if listReq.GetListUsers().GetUid() != nil {
+			t.Fatalf("expected empty uid filter to be omitted, got %+v", listReq.GetListUsers().GetUid())
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_ListUsersResponse{
+				ListUsersResponse: &pb.ListUsersResponse{
+					RequestId: listReq.GetListUsers().GetRequestId(),
+					Items: []*pb.User{
+						{NodeId: 4096, UserId: 1025, Username: "alice", LoginName: "alice.login", Role: "user"},
+						{NodeId: 4096, UserId: 1026, Username: "bob", LoginName: "", Role: "user", ProfileJson: []byte(`{"display_name":"Bob"}`)},
+					},
+					Count: 2,
+				},
+			},
+		})
+
+		filterReq := mustReadClientEnvelope(t, conn)
+		if filterReq.GetListUsers().GetName() != "bo" {
+			t.Fatalf("unexpected filtered list_users name: %q", filterReq.GetListUsers().GetName())
+		}
+		if got := filterReq.GetListUsers().GetUid(); got == nil || got.GetNodeId() != 4096 || got.GetUserId() != 1026 {
+			t.Fatalf("unexpected filtered list_users uid: %+v", got)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_ListUsersResponse{
+				ListUsersResponse: &pb.ListUsersResponse{
+					RequestId: filterReq.GetListUsers().GetRequestId(),
+					Items: []*pb.User{
+						{NodeId: 4096, UserId: 1026, Username: "bob", LoginName: "", Role: "user", ProfileJson: []byte(`{"display_name":"Bob"}`)},
+					},
+					Count: 1,
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:        server.URL,
+		Credentials:    Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
+		RequestTimeout: 2 * time.Second,
+		PingInterval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	allUsers, err := client.ListUsers(ctx, "ignored-token", ListUsersRequest{})
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if len(allUsers) != 2 || allUsers[0].LoginName != "alice.login" || allUsers[1].LoginName != "" {
+		t.Fatalf("unexpected list users response: %+v", allUsers)
+	}
+
+	filteredUsers, err := client.WSListUsers(ctx, ListUsersRequest{
+		Name: "bo",
+		UID:  UserRef{NodeID: 4096, UserID: 1026},
+	})
+	if err != nil {
+		t.Fatalf("WSListUsers: %v", err)
+	}
+	if len(filteredUsers) != 1 || filteredUsers[0].UserID != 1026 || filteredUsers[0].LoginName != "" {
+		t.Fatalf("unexpected filtered users: %+v", filteredUsers)
+	}
+
+	if _, err := client.WSListUsers(ctx, ListUsersRequest{UID: UserRef{NodeID: 4096}}); err == nil {
+		t.Fatal("expected validation error for half-empty websocket uid filter")
+	}
+}
+
 func TestClientBlacklistAndOperationsStatusRPCs(t *testing.T) {
 	owner := UserRef{NodeID: 4096, UserID: 1025}
 	blocked := UserRef{NodeID: 4096, UserID: 1027}

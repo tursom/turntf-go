@@ -38,36 +38,76 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
-		var req map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode create user: %v", err)
+		switch r.Method {
+		case http.MethodGet:
+			if r.URL.RawQuery == "" {
+				json.NewEncoder(w).Encode([]map[string]any{
+					{
+						"node_id":    4096,
+						"user_id":    1025,
+						"username":   "alice",
+						"login_name": "alice.login",
+						"role":       "user",
+					},
+					{
+						"node_id":    4096,
+						"user_id":    1026,
+						"username":   "bob",
+						"login_name": "",
+						"role":       "user",
+						"profile":    map[string]any{"display_name": "Bob"},
+					},
+				})
+				return
+			}
+			if got := r.URL.Query().Get("name"); got != "bo" {
+				t.Fatalf("unexpected list users name filter: %q", got)
+			}
+			if got := r.URL.Query().Get("uid"); got != "4096:1026" {
+				t.Fatalf("unexpected list users uid filter: %q", got)
+			}
+			json.NewEncoder(w).Encode([]map[string]any{{
+				"node_id":    4096,
+				"user_id":    1026,
+				"username":   "bob",
+				"login_name": "",
+				"role":       "user",
+				"profile":    map[string]any{"display_name": "Bob"},
+			}})
+		case http.MethodPost:
+			var req map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode create user: %v", err)
+			}
+			password, _ := req["password"].(string)
+			if password == "alice-password" {
+				t.Fatal("expected create user password to be hashed")
+			}
+			if err := bcrypt.CompareHashAndPassword([]byte(password), []byte("alice-password")); err != nil {
+				t.Fatalf("expected bcrypt password, got %v", err)
+			}
+			if _, ok := req["profile"]; !ok {
+				t.Fatal("expected profile field in create user request")
+			}
+			if _, ok := req["profile_json"]; ok {
+				t.Fatal("did not expect legacy profile_json field in create user request")
+			}
+			if got := req["login_name"]; got != "alice.login" {
+				t.Fatalf("unexpected login_name in create user request: %#v", got)
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"node_id":    4096,
+				"user_id":    1025,
+				"username":   req["username"],
+				"login_name": req["login_name"],
+				"role":       req["role"],
+				"profile":    map[string]any{"tier": "gold"},
+				"created_at": "hlc-created",
+			})
+		default:
+			t.Fatalf("unexpected users method: %s", r.Method)
 		}
-		password, _ := req["password"].(string)
-		if password == "alice-password" {
-			t.Fatal("expected create user password to be hashed")
-		}
-		if err := bcrypt.CompareHashAndPassword([]byte(password), []byte("alice-password")); err != nil {
-			t.Fatalf("expected bcrypt password, got %v", err)
-		}
-		if _, ok := req["profile"]; !ok {
-			t.Fatal("expected profile field in create user request")
-		}
-		if _, ok := req["profile_json"]; ok {
-			t.Fatal("did not expect legacy profile_json field in create user request")
-		}
-		if got := req["login_name"]; got != "alice.login" {
-			t.Fatalf("unexpected login_name in create user request: %#v", got)
-		}
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]any{
-			"node_id":    4096,
-			"user_id":    1025,
-			"username":   req["username"],
-			"login_name": req["login_name"],
-			"role":       req["role"],
-			"profile":    map[string]any{"tier": "gold"},
-			"created_at": "hlc-created",
-		})
 	})
 	mux.HandleFunc("/nodes/4096/users/1025/attachments/channel_subscription/4096/1026", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
@@ -274,6 +314,25 @@ func TestHTTPClientRequestsAndEncoding(t *testing.T) {
 		t.Fatalf("CreateSubscription: %v", err)
 	}
 
+	allUsers, err := client.ListUsers(ctx, token, ListUsersRequest{})
+	if err != nil {
+		t.Fatalf("ListUsers all: %v", err)
+	}
+	if len(allUsers) != 2 || allUsers[0].LoginName != "alice.login" || allUsers[1].LoginName != "" {
+		t.Fatalf("unexpected all users: %+v", allUsers)
+	}
+
+	filteredUsers, err := client.ListUsers(ctx, token, ListUsersRequest{
+		Name: "bo",
+		UID:  UserRef{NodeID: 4096, UserID: 1026},
+	})
+	if err != nil {
+		t.Fatalf("ListUsers filtered: %v", err)
+	}
+	if len(filteredUsers) != 1 || filteredUsers[0].UserID != 1026 || filteredUsers[0].LoginName != "" {
+		t.Fatalf("unexpected filtered users: %+v", filteredUsers)
+	}
+
 	messages, err := client.ListMessages(ctx, token, UserRef{NodeID: 4096, UserID: 1025}, 20, 0, 0)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
@@ -386,6 +445,15 @@ func TestHTTPClientListNodeLoggedInUsersRequiresNodeID(t *testing.T) {
 	client := NewHTTPClient("http://127.0.0.1:8080")
 	if _, err := client.ListNodeLoggedInUsers(context.Background(), "token", 0); err == nil {
 		t.Fatal("expected validation error for empty node_id")
+	}
+}
+
+func TestHTTPClientListUsersRejectsHalfEmptyUID(t *testing.T) {
+	client := NewHTTPClient("http://127.0.0.1:8080")
+	if _, err := client.ListUsers(context.Background(), "token", ListUsersRequest{
+		UID: UserRef{NodeID: 4096},
+	}); err == nil {
+		t.Fatal("expected validation error for half-empty uid filter")
 	}
 }
 

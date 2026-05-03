@@ -282,6 +282,7 @@ messages primary key: (node_id, seq)
 
 - 持久化 `send_message`
 - `create_user` / `get_user` / `update_user` / `delete_user`
+- `list_users`
 - `list_messages`
 - `upsert_user_attachment` / `delete_user_attachment` / `list_user_attachments`
 - `list_events`
@@ -351,6 +352,7 @@ accepted, err := client.SendPacketToSession(
 
 `Client` 比 `HTTPClient` 更完整，支持：
 
+- `ListUsers` / `WSListUsers`
 - `ListEvents`
 - `OperationsStatus`
 - `Metrics`
@@ -359,6 +361,7 @@ accepted, err := client.SendPacketToSession(
 
 `HTTPClient` 当前只覆盖：
 
+- `ListUsers`
 - `ListClusterNodes`
 - `ListNodeLoggedInUsers`
 
@@ -427,7 +430,7 @@ default:
 当前已覆盖的方法：
 
 - `Login`
-- `CreateUser` / `CreateChannel`
+- `CreateUser` / `CreateChannel` / `ListUsers`
 - `CreateSubscription`
 - `ListMessages`
 - `PostMessage`

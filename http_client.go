@@ -117,6 +117,19 @@ func (r *httpNodeLoggedInUsersResponse) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*alias)(r))
 }
 
+type httpUsersResponse struct {
+	Items []httpUserResponse `json:"items"`
+	Count int                `json:"count"`
+}
+
+func (r *httpUsersResponse) UnmarshalJSON(data []byte) error {
+	if isJSONArray(data) {
+		return json.Unmarshal(data, &r.Items)
+	}
+	type alias httpUsersResponse
+	return json.Unmarshal(data, (*alias)(r))
+}
+
 type httpAttachmentsResponse struct {
 	Items []Attachment `json:"items"`
 	Count int          `json:"count"`
@@ -247,6 +260,32 @@ func (c *HTTPClient) CreateChannel(ctx context.Context, token string, req Create
 		req.Role = "channel"
 	}
 	return c.CreateUser(ctx, token, req)
+}
+
+// ListUsers 通过 HTTP 接口查询当前用户可通讯的活跃用户列表。
+// req 中可选的 Name 会在可见用户集合内做大小写不敏感子串匹配；UID 会按 node_id:user_id 精确过滤。
+func (c *HTTPClient) ListUsers(ctx context.Context, token string, req ListUsersRequest) ([]User, error) {
+	req = req.normalized()
+	if err := req.validate(); err != nil {
+		return nil, err
+	}
+
+	values := url.Values{}
+	if req.Name != "" {
+		values.Set("name", req.Name)
+	}
+	if !req.UID.IsZero() {
+		values.Set("uid", fmt.Sprintf("%d:%d", req.UID.NodeID, req.UID.UserID))
+	}
+
+	path := "/users"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+
+	var resp httpUsersResponse
+	err := c.doJSON(ctx, http.MethodGet, path, token, nil, &resp, http.StatusOK)
+	return usersFromHTTP(resp.Items), err
 }
 
 // CreateSubscription 通过 HTTP 接口创建频道订阅关系。订阅者将收到频道的消息推送。
@@ -722,6 +761,14 @@ func userFromHTTP(in httpUserResponse) User {
 		UpdatedAt:      in.UpdatedAt,
 		OriginNodeID:   in.OriginNodeID,
 	}
+}
+
+func usersFromHTTP(items []httpUserResponse) []User {
+	out := make([]User, 0, len(items))
+	for _, item := range items {
+		out = append(out, userFromHTTP(item))
+	}
+	return out
 }
 
 func messageFromHTTP(in httpMessageResponse) Message {

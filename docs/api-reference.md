@@ -35,6 +35,7 @@ import turntf "github.com/tursom/turntf-go"
   - [`AttachmentType`](#attachmenttype)
   - [`CreateUserRequest`](#createuserrequest)
   - [`UpdateUserRequest`](#updateuserrequest)
+  - [`ListUsersRequest`](#listusersrequest)
 - [用户元数据](#用户元数据)
   - [`UserMetadata`](#usermetadata)
   - [`UpsertUserMetadataRequest`](#upsertusermetadatarequest)
@@ -361,6 +362,24 @@ type UpdateUserRequest struct {
 ```
 
 使用指针字段表示可选更新，传 `nil` 表示不修改该字段。`LoginName` 显式传空串会触发解绑。
+
+### `ListUsersRequest`
+
+```go
+type ListUsersRequest struct {
+    Name string  `json:"name,omitempty"`
+    UID  UserRef `json:"uid,omitempty"`
+}
+```
+
+列出当前用户可通讯活跃用户列表的过滤参数。
+
+- `Name`：可选，大小写不敏感子串匹配
+- `UID`：可选，精确过滤到某个 `UserRef`
+- 同时指定时按 `AND` 组合
+- `UID` 为零值表示“不按 uid 过滤”；半空值会在 SDK 本地直接报错
+
+服务端返回的 `User.LoginName` 对普通用户来说可能为空，这表示服务端做了可见性脱敏，不是 SDK 解码异常。
 
 ---
 

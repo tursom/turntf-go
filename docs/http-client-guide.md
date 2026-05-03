@@ -116,6 +116,23 @@ err = httpClient.CreateSubscription(ctx, token,
 
 `CreateSubscription` 内部实际调用的是 `UpsertAttachment`，`AttachmentType` 为 `AttachmentTypeChannelSubscription`。
 
+### 查询可通讯用户列表
+
+```go
+users, err := httpClient.ListUsers(ctx, token, turntf.ListUsersRequest{
+    Name: "bob",
+    UID:  turntf.UserRef{NodeID: 4096, UserID: 1026},
+})
+```
+
+说明：
+
+- 返回的是“当前登录用户可通讯的活跃用户集合”，不是全量用户目录
+- `Name` 是可选过滤条件，会在可见用户集合内做大小写不敏感子串匹配
+- `UID` 是可选精确过滤条件；HTTP 线上会编码为 `node_id:user_id`
+- 两个过滤条件同时存在时按 `AND` 组合
+- 普通用户查看其他联系人时，服务端可能返回空的 `LoginName`
+
 ## 消息操作
 
 ### 发送持久化消息

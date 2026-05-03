@@ -37,12 +37,16 @@ type NopHandler struct{}
 
 // OnLogin 是登录成功事件的空处理器。
 func (NopHandler) OnLogin(context.Context, LoginInfo) {}
+
 // OnMessage 是消息推送事件的空处理器。
 func (NopHandler) OnMessage(context.Context, Message) {}
+
 // OnPacket 是数据包推送事件的空处理器。
-func (NopHandler) OnPacket(context.Context, Packet)    {}
+func (NopHandler) OnPacket(context.Context, Packet) {}
+
 // OnError 是错误事件的空处理器。
-func (NopHandler) OnError(context.Context, error)      {}
+func (NopHandler) OnError(context.Context, error) {}
+
 // OnDisconnect 是断开连接事件的空处理器。
 func (NopHandler) OnDisconnect(context.Context, error) {}
 
@@ -50,33 +54,33 @@ func (NopHandler) OnDisconnect(context.Context, error) {}
 // 创建客户端后可通过 NewClient 初始化，未设置的字段会使用合理的默认值。
 type Config struct {
 	// BaseURL 是服务端基础地址，格式如 "http://localhost:8080"，必填。
-	BaseURL               string
+	BaseURL string
 	// Credentials 是用户登录凭据，必填。
-	Credentials           Credentials
+	Credentials Credentials
 	// CursorStore 是消息游标持久化存储，用于消息去重。默认为 NewMemoryCursorStore()。
-	CursorStore           CursorStore
+	CursorStore CursorStore
 	// Handler 是事件处理器，接收登录、消息、错误等事件。默认为 NopHandler。
-	Handler               Handler
+	Handler Handler
 	// HTTPClient 是 HTTP 客户端实例，用于底层 HTTP 请求。默认为 http.DefaultClient。
-	HTTPClient            *http.Client
+	HTTPClient *http.Client
 	// Logger 是日志记录器。为空则不输出日志。
-	Logger                Logger
+	Logger Logger
 	// Reconnect 是否启用自动重连，默认为 true。
-	Reconnect             bool
+	Reconnect bool
 	// InitialReconnectDelay 首次重连等待时间，默认为 1 秒。
 	InitialReconnectDelay time.Duration
 	// MaxReconnectDelay 最大重连等待时间（指数退避上限），默认为 30 秒。
-	MaxReconnectDelay     time.Duration
+	MaxReconnectDelay time.Duration
 	// PingInterval WebSocket ping 间隔，默认为 30 秒。
-	PingInterval          time.Duration
+	PingInterval time.Duration
 	// RequestTimeout RPC 请求超时时间，默认为 10 秒。
-	RequestTimeout        time.Duration
+	RequestTimeout time.Duration
 	// AckMessages 是否自动确认已收到的消息，默认为 true。
-	AckMessages           bool
+	AckMessages bool
 	// TransientOnly 是否仅接收瞬时消息（不接收持久化消息推送），默认为 false。
-	TransientOnly         bool
+	TransientOnly bool
 	// RealtimeStream 是否使用实时流通道（/ws/realtime），默认为 false（使用 /ws/client）。
-	RealtimeStream        bool
+	RealtimeStream bool
 }
 
 // Client 是 WebSocket 客户端，管理与服务端的长连接、消息收发、自动重连和 RPC 请求。
@@ -253,6 +257,13 @@ func (c *Client) CreateChannel(ctx context.Context, token string, req CreateUser
 		req.Role = "channel"
 	}
 	return c.CreateUser(ctx, token, req)
+}
+
+// ListUsers 通过 WebSocket RPC 查询当前用户可通讯的活跃用户列表。
+// token 参数当前未被使用（保留以保持 API 一致），请求通过 WebSocket 连接发送。
+func (c *Client) ListUsers(ctx context.Context, token string, req ListUsersRequest) ([]User, error) {
+	_ = token
+	return c.WSListUsers(ctx, req)
 }
 
 // CreateSubscription 通过 WebSocket RPC 创建频道订阅关系。订阅者将收到频道的消息推送。
@@ -922,6 +933,36 @@ func (c *Client) WSListMessages(ctx context.Context, target UserRef, limit int) 
 	return items, nil
 }
 
+// WSListUsers 通过 WebSocket RPC 查询当前用户可通讯的活跃用户列表。
+// 与 HTTPClient.ListUsers 功能相同，但直接调用 WebSocket 底层方法。
+func (c *Client) WSListUsers(ctx context.Context, req ListUsersRequest) ([]User, error) {
+	req = req.normalized()
+	if err := req.validate(); err != nil {
+		return nil, err
+	}
+
+	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+		return &pb.ClientEnvelope{
+			Body: &pb.ClientEnvelope_ListUsers{
+				ListUsers: &pb.ListUsersRequest{
+					RequestId: requestID,
+					Name:      req.Name,
+					Uid:       userRefToProto(req.UID),
+				},
+			},
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	items, ok := res.value.([]User)
+	if !ok {
+		return nil, &ProtocolError{Message: "missing items in list_users_response"}
+	}
+	return items, nil
+}
+
 // ListEvents 通过 WebSocket RPC 查询事件日志，从指定序列号之后开始拉取。
 // after 为起始事件序列号（不包含），limit 控制返回数量上限。
 func (c *Client) ListEvents(ctx context.Context, after int64, limit int) ([]Event, error) {
@@ -1252,10 +1293,10 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 		c.cfg.Handler.OnMessage(c.ctx, msg)
 	case *pb.ServerEnvelope_PacketPushed:
 		pkt := packetFromProto(body.PacketPushed.Packet)
-			if c.relay != nil && c.relay.handlePacket(pkt) {
-				return nil
-			}
-			c.cfg.Handler.OnPacket(c.ctx, pkt)
+		if c.relay != nil && c.relay.handlePacket(pkt) {
+			return nil
+		}
+		c.cfg.Handler.OnPacket(c.ctx, pkt)
 	case *pb.ServerEnvelope_SendMessageResponse:
 		res := requestResult{}
 		switch inner := body.SendMessageResponse.Body.(type) {
@@ -1293,6 +1334,8 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 			Status: body.DeleteUserResponse.Status,
 			User:   userRefFromProto(body.DeleteUserResponse.User),
 		}})
+	case *pb.ServerEnvelope_ListUsersResponse:
+		c.resolvePending(body.ListUsersResponse.RequestId, requestResult{value: usersFromProto(body.ListUsersResponse.Items)})
 	case *pb.ServerEnvelope_ListMessagesResponse:
 		c.resolvePending(body.ListMessagesResponse.RequestId, requestResult{value: messagesFromProto(body.ListMessagesResponse.Items)})
 	case *pb.ServerEnvelope_UpsertUserAttachmentResponse:

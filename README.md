@@ -147,13 +147,14 @@ message, err := httpClient.PostMessage(ctx, token, turntf.UserRef{
 - **`AckMessage`**：仅用于当前连接内的去重提示。真正的重连恢复依赖 `seen_messages`，而非服务端记忆上一次的 ack。
 - **`SendMessageResponse.message`**：高层 SDK 也会执行 `SaveMessage -> SaveCursor`，使发送成功的持久化消息与推送消息共用同一套本地幂等逻辑。
 - **瞬时包**：`SendPacket` / `SendPacketToSession` 仅表示"路由层已受理"，不代表目标用户一定已收到。
+- **可通讯用户列表**：`ListUsers` / `WSListUsers` / `HTTPClient.ListUsers` 返回当前用户可通讯的活跃用户集合，并支持按 `name` 和 `uid` 过滤。普通用户看到他人时，`LoginName` 可能为空。
 
 ### 长连接 Client
 
 - **生命周期**：`Connect`、`Close`、`CurrentLogin`、`Ping`
 - **持久化消息**：`SendMessage`、`WSListMessages`
 - **瞬时包**：`SendPacket`、`SendPacketToSession`
-- **用户管理**：`CreateUser`、`CreateChannel`、`GetUser`、`UpdateUser`、`DeleteUser`
+- **用户管理**：`CreateUser`、`CreateChannel`、`ListUsers`、`WSListUsers`、`GetUser`、`UpdateUser`、`DeleteUser`
 - **关系管理**：`SubscribeChannel`、`UnsubscribeChannel`、`ListSubscriptions`
 - **黑名单**：`BlockUser`、`UnblockUser`、`ListBlockedUsers`
 - **运维与集群**：`ListClusterNodes`、`ListNodeLoggedInUsers`、`ResolveUserSessions`、`ListEvents`、`OperationsStatus`、`Metrics`
@@ -161,7 +162,7 @@ message, err := httpClient.PostMessage(ctx, token, turntf.UserRef{
 ### HTTPClient
 
 - **登录**：`Login`、`LoginWithPassword`、`LoginByLoginName`、`LoginByLoginNameWithPassword`
-- **用户**：`CreateUser`、`CreateChannel`
+- **用户**：`CreateUser`、`CreateChannel`、`ListUsers`
 - **消息**：`ListMessages`、`PostMessage`、`PostPacket`
 - **集群**：`ListClusterNodes`、`ListNodeLoggedInUsers`
 - **关系**：`CreateSubscription`、`BlockUser`、`UnblockUser`、`ListBlockedUsers`

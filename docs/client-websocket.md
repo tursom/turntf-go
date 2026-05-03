@@ -54,6 +54,11 @@ message ClientEnvelope {
     ListClusterNodesRequest list_cluster_nodes = 16;
     ListNodeLoggedInUsersRequest list_node_logged_in_users = 17;
     ResolveUserSessionsRequest resolve_user_sessions = 18;
+    GetUserMetadataRequest get_user_metadata = 19;
+    UpsertUserMetadataRequest upsert_user_metadata = 20;
+    DeleteUserMetadataRequest delete_user_metadata = 21;
+    ScanUserMetadataRequest scan_user_metadata = 22;
+    ListUsersRequest list_users = 23;
   }
 }
 ```
@@ -81,6 +86,11 @@ message ServerEnvelope {
     ListClusterNodesResponse list_cluster_nodes_response = 18;
     ListNodeLoggedInUsersResponse list_node_logged_in_users_response = 19;
     ResolveUserSessionsResponse resolve_user_sessions_response = 20;
+    GetUserMetadataResponse get_user_metadata_response = 21;
+    UpsertUserMetadataResponse upsert_user_metadata_response = 22;
+    DeleteUserMetadataResponse delete_user_metadata_response = 23;
+    ScanUserMetadataResponse scan_user_metadata_response = 24;
+    ListUsersResponse list_users_response = 25;
   }
 }
 ```
@@ -370,6 +380,11 @@ ServerEnvelope {
 - `list_cluster_nodes`
 - `list_node_logged_in_users`
 - `resolve_user_sessions`
+- `get_user_metadata`
+- `upsert_user_metadata`
+- `delete_user_metadata`
+- `scan_user_metadata`
+- `list_users`
 
 ### 概念 API 与 attachment RPC 的映射
 
@@ -430,6 +445,35 @@ ClientEnvelope {
 }
 ```
 
+### 例子：查询可通讯用户列表
+
+```protobuf
+ClientEnvelope {
+  list_users: ListUsersRequest {
+    request_id: 1004
+    name: "bob"
+    uid: { node_id: 4096, user_id: 1026 }
+  }
+}
+```
+
+```protobuf
+ServerEnvelope {
+  list_users_response: ListUsersResponse {
+    request_id: 1004
+    items: [
+      {
+        node_id: 4096
+        user_id: 1026
+        username: "bob"
+        profile_json: "{\"display_name\":\"Bob\"}"
+      }
+    ]
+    count: 1
+  }
+}
+```
+
 ```protobuf
 ServerEnvelope {
   resolve_user_sessions_response: ResolveUserSessionsResponse {
@@ -470,6 +514,7 @@ ServerEnvelope {
 - `get_user`
 - `update_user`
 - `delete_user`
+- `list_users`
 - `list_messages`
 - `upsert_user_attachment`
 - `delete_user_attachment`
@@ -536,6 +581,7 @@ ServerEnvelope {
 | `message_pushed` | `Handler.OnMessage()` | SDK 先做持久化和 ack |
 | `packet_pushed` | `Handler.OnPacket()` | SDK 不做游标处理 |
 | `send_message` | `SendMessage()` / `SendPacket()` | 持久化与瞬时包共用一个 proto |
+| `list_users` | `ListUsers()` / `WSListUsers()` | 查询当前可通讯用户列表 |
 | `resolve_user_sessions` | `ResolveUserSessions()` | 定向 packet 前通常先调用 |
 | `upsert_user_attachment` | `SubscribeChannel()` / `BlockUser()` / `UpsertAttachment()` | 高层封装了语义名 |
 

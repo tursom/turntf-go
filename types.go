@@ -412,14 +412,14 @@ func DefaultRelayConfig() RelayConfig {
 
 // RelayEnvelope 是 relay 协议的帧类型，与 proto RelayEnvelope 对应。
 type RelayEnvelope struct {
-	RelayID        string
-	Kind           RelayKind
-	SenderSession  SessionRef
-	TargetSession  SessionRef
-	Seq            uint64
-	AckSeq         uint64
-	Payload        []byte
-	SentAtMs       int64
+	RelayID       string
+	Kind          RelayKind
+	SenderSession SessionRef
+	TargetSession SessionRef
+	Seq           uint64
+	AckSeq        uint64
+	Payload       []byte
+	SentAtMs      int64
 }
 
 // RelayError 表示 relay 层的错误。
@@ -465,6 +465,13 @@ type UpdateUserRequest struct {
 	Password    *PasswordInput `json:"password,omitempty"`
 	ProfileJSON *[]byte        `json:"profile_json,omitempty"`
 	Role        *string        `json:"role,omitempty"`
+}
+
+// ListUsersRequest 是列出当前可通讯用户列表的过滤参数。
+// Name 为大小写不敏感子串匹配；UID 为可选的精确用户过滤条件。
+type ListUsersRequest struct {
+	Name string  `json:"name,omitempty"`
+	UID  UserRef `json:"uid,omitempty"`
 }
 
 // Cursor 返回该消息的游标，由消息所在节点 ID 和序列号组成，用于消息去重和 ACK 确认。
@@ -522,8 +529,31 @@ func (r UserRef) validate() error {
 	return nil
 }
 
+// IsZero 判断 UserRef 是否为空（未设置任何值）。
+func (r UserRef) IsZero() bool {
+	return r.NodeID == 0 && r.UserID == 0
+}
+
 func validateMetadataKey(key string) error {
 	return validateMetadataKeyFragment(key, "key", false)
+}
+
+func (r ListUsersRequest) validate() error {
+	if r.UID.IsZero() {
+		return nil
+	}
+	if r.UID.NodeID <= 0 {
+		return fmt.Errorf("uid.node_id must be a positive integer")
+	}
+	if r.UID.UserID <= 0 {
+		return fmt.Errorf("uid.user_id must be a positive integer")
+	}
+	return nil
+}
+
+func (r ListUsersRequest) normalized() ListUsersRequest {
+	r.Name = strings.TrimSpace(r.Name)
+	return r
 }
 
 func validateMetadataKeyFragment(value, field string, allowEmpty bool) error {
@@ -613,6 +643,9 @@ func deliveryModeFromProto(mode pb.ClientDeliveryMode) DeliveryMode {
 }
 
 func userRefToProto(in UserRef) *pb.UserRef {
+	if in.IsZero() {
+		return nil
+	}
 	return &pb.UserRef{
 		NodeId: in.NodeID,
 		UserId: in.UserID,
@@ -665,6 +698,14 @@ func userFromProto(in *pb.User) User {
 		UpdatedAt:      in.UpdatedAt,
 		OriginNodeID:   in.OriginNodeId,
 	}
+}
+
+func usersFromProto(items []*pb.User) []User {
+	out := make([]User, 0, len(items))
+	for _, item := range items {
+		out = append(out, userFromProto(item))
+	}
+	return out
 }
 
 func cursorToProto(in MessageCursor) *pb.MessageCursor {
