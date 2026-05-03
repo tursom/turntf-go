@@ -149,23 +149,25 @@ type BlacklistEntry struct {
 	OriginNodeID int64   `json:"origin_node_id"`
 }
 
-// UserMetadata 表示用户的自定义元数据键值对，支持过期时间设置。
-// 元数据用于存储用户维度的配置信息、状态等轻量数据。
+// UserMetadata 表示用户或频道的自定义元数据键值对，支持过期时间设置。
+// Value 始终是原始字节；TypedValue 仅在 HTTP JSON 返回可稳定解释的视图时才会填充。
 type UserMetadata struct {
-	Owner        UserRef `json:"owner"`
-	Key          string  `json:"key"`
-	Value        []byte  `json:"value"`
-	UpdatedAt    string  `json:"updated_at,omitempty"`
-	DeletedAt    string  `json:"deleted_at,omitempty"`
-	ExpiresAt    string  `json:"expires_at,omitempty"`
-	OriginNodeID int64   `json:"origin_node_id"`
+	Owner        UserRef             `json:"owner"`
+	Key          string              `json:"key"`
+	Value        []byte              `json:"value"`
+	TypedValue   *MetadataTypedValue `json:"typed_value,omitempty"`
+	UpdatedAt    string              `json:"updated_at,omitempty"`
+	DeletedAt    string              `json:"deleted_at,omitempty"`
+	ExpiresAt    string              `json:"expires_at,omitempty"`
+	OriginNodeID int64               `json:"origin_node_id"`
 }
 
 // UpsertUserMetadataRequest 是创建或更新用户元数据的请求参数。
-// Value 为新的元数据值（字节数组），ExpiresAt 为可选过期时间（RFC3339 格式字符串）。
+// HTTP JSON 支持 Value 与 TypedValue 二选一；WebSocket / protobuf 仅支持 Value 原始字节。
 type UpsertUserMetadataRequest struct {
-	Value     []byte  `json:"value"`
-	ExpiresAt *string `json:"expires_at,omitempty"`
+	Value      []byte              `json:"value"`
+	TypedValue *MetadataTypedValue `json:"typed_value,omitempty"`
+	ExpiresAt  *string             `json:"expires_at,omitempty"`
 }
 
 // ScanUserMetadataRequest 是按前缀分页扫描用户元数据的请求参数。
@@ -469,6 +471,7 @@ type UpdateUserRequest struct {
 
 // ListUsersRequest 是列出当前可通讯用户列表的过滤参数。
 // Name 为大小写不敏感子串匹配；UID 为可选的精确用户过滤条件。
+// 普通用户看到的集合会受服务端可见性策略影响，例如 `system.visible_to_others=false`。
 type ListUsersRequest struct {
 	Name string  `json:"name,omitempty"`
 	UID  UserRef `json:"uid,omitempty"`
@@ -535,7 +538,10 @@ func (r UserRef) IsZero() bool {
 }
 
 func validateMetadataKey(key string) error {
-	return validateMetadataKeyFragment(key, "key", false)
+	if err := validateMetadataKeyFragment(key, "key", false); err != nil {
+		return err
+	}
+	return validateMetadataKeyPolicy(key)
 }
 
 func (r ListUsersRequest) validate() error {
@@ -577,6 +583,9 @@ func (r ScanUserMetadataRequest) validate() error {
 		return err
 	}
 	if err := validateMetadataKeyFragment(r.After, "after", true); err != nil {
+		return err
+	}
+	if err := validateMetadataScanSystemPrefix(r.Prefix, r.After); err != nil {
 		return err
 	}
 	if r.Limit < 0 {

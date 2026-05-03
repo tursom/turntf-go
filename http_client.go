@@ -264,6 +264,7 @@ func (c *HTTPClient) CreateChannel(ctx context.Context, token string, req Create
 
 // ListUsers 通过 HTTP 接口查询当前用户可通讯的活跃用户列表。
 // req 中可选的 Name 会在可见用户集合内做大小写不敏感子串匹配；UID 会按 node_id:user_id 精确过滤。
+// 普通用户的结果会受服务端可见性 metadata 影响，例如 `system.visible_to_others=false`。
 func (c *HTTPClient) ListUsers(ctx context.Context, token string, req ListUsersRequest) ([]User, error) {
 	req = req.normalized()
 	if err := req.validate(); err != nil {
@@ -528,7 +529,7 @@ func (c *HTTPClient) Metrics(ctx context.Context, token string) (string, error) 
 	return c.doText(ctx, "/metrics", token, http.StatusOK)
 }
 
-// GetUserMetadata 通过 HTTP 接口获取指定用户的指定元数据键值。
+// GetUserMetadata 通过 HTTP 接口获取指定用户或频道的指定元数据键值。
 // key 为元数据键名，仅允许字母、数字、点、下划线、冒号和短横线。
 func (c *HTTPClient) GetUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
 	var metadata UserMetadata
@@ -546,8 +547,8 @@ func (c *HTTPClient) GetUserMetadata(ctx context.Context, token string, owner Us
 	return userMetadataFromHTTP(metadata), nil
 }
 
-// UpsertUserMetadata 通过 HTTP 接口创建或更新用户元数据。
-// key 为元数据键名，req 包含新的值和可选的过期时间。
+// UpsertUserMetadata 通过 HTTP 接口创建或更新用户或频道元数据。
+// key 为元数据键名，req 支持 value / typed_value 二选一和可选的过期时间。
 func (c *HTTPClient) UpsertUserMetadata(ctx context.Context, token string, owner UserRef, key string, req UpsertUserMetadataRequest) (UserMetadata, error) {
 	var metadata UserMetadata
 	if err := owner.validate(); err != nil {
@@ -556,18 +557,18 @@ func (c *HTTPClient) UpsertUserMetadata(ctx context.Context, token string, owner
 	if err := validateMetadataKey(key); err != nil {
 		return metadata, err
 	}
+	if err := validateHTTPMetadataUpsertRequest(key, req); err != nil {
+		return metadata, err
+	}
 
-	err := c.doJSON(ctx, http.MethodPut, userMetadataPath(owner, key), token, UpsertUserMetadataRequest{
-		Value:     append([]byte{}, req.Value...),
-		ExpiresAt: req.ExpiresAt,
-	}, &metadata, http.StatusCreated, http.StatusOK)
+	err := c.doJSON(ctx, http.MethodPut, userMetadataPath(owner, key), token, req.clone(), &metadata, http.StatusCreated, http.StatusOK)
 	if err != nil {
 		return UserMetadata{}, err
 	}
 	return userMetadataFromHTTP(metadata), nil
 }
 
-// DeleteUserMetadata 通过 HTTP 接口删除用户元数据（软删除）。
+// DeleteUserMetadata 通过 HTTP 接口删除用户或频道元数据（软删除）。
 func (c *HTTPClient) DeleteUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
 	var metadata UserMetadata
 	if err := owner.validate(); err != nil {
@@ -584,7 +585,7 @@ func (c *HTTPClient) DeleteUserMetadata(ctx context.Context, token string, owner
 	return userMetadataFromHTTP(metadata), nil
 }
 
-// ScanUserMetadata 通过 HTTP 接口按前缀分页扫描用户元数据。
+// ScanUserMetadata 通过 HTTP 接口按前缀分页扫描用户或频道元数据。
 // req 包含前缀过滤条件、分页游标和每页限制数量。
 func (c *HTTPClient) ScanUserMetadata(ctx context.Context, token string, owner UserRef, req ScanUserMetadataRequest) (UserMetadataPage, error) {
 	if err := owner.validate(); err != nil {
@@ -799,7 +800,8 @@ func userMetadataPath(owner UserRef, key string) string {
 }
 
 func userMetadataFromHTTP(in UserMetadata) UserMetadata {
-	in.Value = append([]byte(nil), in.Value...)
+	in.Value = cloneBytesPreserveNil(in.Value)
+	in.TypedValue = cloneMetadataTypedValue(in.TypedValue)
 	return in
 }
 

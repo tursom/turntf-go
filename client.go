@@ -261,6 +261,7 @@ func (c *Client) CreateChannel(ctx context.Context, token string, req CreateUser
 
 // ListUsers 通过 WebSocket RPC 查询当前用户可通讯的活跃用户列表。
 // token 参数当前未被使用（保留以保持 API 一致），请求通过 WebSocket 连接发送。
+// 普通用户结果会受服务端可见性 metadata 影响，例如 `system.visible_to_others=false`。
 func (c *Client) ListUsers(ctx context.Context, token string, req ListUsersRequest) ([]User, error) {
 	_ = token
 	return c.WSListUsers(ctx, req)
@@ -304,25 +305,28 @@ func (c *Client) PostPacket(ctx context.Context, token string, targetNodeID int6
 	return err
 }
 
-// GetUserMetadata 通过 WebSocket RPC 获取指定用户的指定元数据键值。
+// GetUserMetadata 通过 WebSocket RPC 获取指定用户或频道的指定元数据键值。
+// WebSocket / protobuf 只返回原始 Value 字节，TypedValue 始终为空。
 func (c *Client) GetUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
 	_ = token
 	return c.WSGetUserMetadata(ctx, owner, key)
 }
 
-// UpsertUserMetadata 通过 WebSocket RPC 创建或更新用户元数据。
+// UpsertUserMetadata 通过 WebSocket RPC 创建或更新用户或频道元数据。
+// WebSocket / protobuf 不支持 typed_value，请改用 Value 原始字节。
 func (c *Client) UpsertUserMetadata(ctx context.Context, token string, owner UserRef, key string, req UpsertUserMetadataRequest) (UserMetadata, error) {
 	_ = token
 	return c.WSUpsertUserMetadata(ctx, owner, key, req)
 }
 
-// DeleteUserMetadata 通过 WebSocket RPC 删除用户元数据（软删除）。
+// DeleteUserMetadata 通过 WebSocket RPC 删除用户或频道元数据（软删除）。
 func (c *Client) DeleteUserMetadata(ctx context.Context, token string, owner UserRef, key string) (UserMetadata, error) {
 	_ = token
 	return c.WSDeleteUserMetadata(ctx, owner, key)
 }
 
-// ScanUserMetadata 通过 WebSocket RPC 按前缀分页扫描用户元数据。
+// ScanUserMetadata 通过 WebSocket RPC 按前缀分页扫描用户或频道元数据。
+// WebSocket / protobuf 只返回原始 Value 字节，TypedValue 始终为空。
 func (c *Client) ScanUserMetadata(ctx context.Context, token string, owner UserRef, req ScanUserMetadataRequest) (UserMetadataPage, error) {
 	_ = token
 	return c.WSScanUserMetadata(ctx, owner, req)
@@ -572,8 +576,8 @@ func (c *Client) DeleteUser(ctx context.Context, target UserRef) (DeleteUserResu
 	return result, nil
 }
 
-// WSGetUserMetadata 通过 WebSocket RPC 获取指定用户的指定元数据键值。
-// 与 GetUserMetadata 功能相同，但直接调用 WebSocket 底层方法。
+// WSGetUserMetadata 通过 WebSocket RPC 获取指定用户或频道的指定元数据键值。
+// 与 GetUserMetadata 功能相同，但直接调用 WebSocket 底层方法；返回值只包含原始 Value 字节。
 func (c *Client) WSGetUserMetadata(ctx context.Context, owner UserRef, key string) (UserMetadata, error) {
 	var zero UserMetadata
 	if err := owner.validate(); err != nil {
@@ -605,14 +609,17 @@ func (c *Client) WSGetUserMetadata(ctx context.Context, owner UserRef, key strin
 	return metadata, nil
 }
 
-// WSUpsertUserMetadata 通过 WebSocket RPC 创建或更新用户元数据。
-// 与 UpsertUserMetadata 功能相同，但直接调用 WebSocket 底层方法。
+// WSUpsertUserMetadata 通过 WebSocket RPC 创建或更新用户或频道元数据。
+// 与 UpsertUserMetadata 功能相同，但直接调用 WebSocket 底层方法；只支持 Value 原始字节。
 func (c *Client) WSUpsertUserMetadata(ctx context.Context, owner UserRef, key string, req UpsertUserMetadataRequest) (UserMetadata, error) {
 	var zero UserMetadata
 	if err := owner.validate(); err != nil {
 		return zero, fmt.Errorf("invalid owner: %w", err)
 	}
 	if err := validateMetadataKey(key); err != nil {
+		return zero, err
+	}
+	if err := validateWSMetadataUpsertRequest(key, req); err != nil {
 		return zero, err
 	}
 
@@ -623,7 +630,7 @@ func (c *Client) WSUpsertUserMetadata(ctx context.Context, owner UserRef, key st
 					RequestId: requestID,
 					Owner:     userRefToProto(owner),
 					Key:       key,
-					Value:     append([]byte{}, req.Value...),
+					Value:     cloneBytesPreserveNil(req.Value),
 					ExpiresAt: optionalStringField(req.ExpiresAt),
 				},
 			},
@@ -640,7 +647,7 @@ func (c *Client) WSUpsertUserMetadata(ctx context.Context, owner UserRef, key st
 	return metadata, nil
 }
 
-// WSDeleteUserMetadata 通过 WebSocket RPC 删除用户元数据（软删除）。
+// WSDeleteUserMetadata 通过 WebSocket RPC 删除用户或频道元数据（软删除）。
 // 与 DeleteUserMetadata 功能相同，但直接调用 WebSocket 底层方法。
 func (c *Client) WSDeleteUserMetadata(ctx context.Context, owner UserRef, key string) (UserMetadata, error) {
 	var zero UserMetadata
@@ -673,8 +680,8 @@ func (c *Client) WSDeleteUserMetadata(ctx context.Context, owner UserRef, key st
 	return metadata, nil
 }
 
-// WSScanUserMetadata 通过 WebSocket RPC 按前缀分页扫描用户元数据。
-// 与 ScanUserMetadata 功能相同，但直接调用 WebSocket 底层方法。
+// WSScanUserMetadata 通过 WebSocket RPC 按前缀分页扫描用户或频道元数据。
+// 与 ScanUserMetadata 功能相同，但直接调用 WebSocket 底层方法；返回值只包含原始 Value 字节。
 func (c *Client) WSScanUserMetadata(ctx context.Context, owner UserRef, req ScanUserMetadataRequest) (UserMetadataPage, error) {
 	var zero UserMetadataPage
 	if err := owner.validate(); err != nil {
@@ -935,6 +942,7 @@ func (c *Client) WSListMessages(ctx context.Context, target UserRef, limit int) 
 
 // WSListUsers 通过 WebSocket RPC 查询当前用户可通讯的活跃用户列表。
 // 与 HTTPClient.ListUsers 功能相同，但直接调用 WebSocket 底层方法。
+// 普通用户结果会受服务端可见性 metadata 影响，例如 `system.visible_to_others=false`。
 func (c *Client) WSListUsers(ctx context.Context, req ListUsersRequest) ([]User, error) {
 	req = req.normalized()
 	if err := req.validate(); err != nil {
