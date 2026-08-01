@@ -126,14 +126,14 @@ func (r *Relay) Connect(ctx context.Context, target UserRef, config *RelayConfig
 }
 
 // acceptIncoming 将入站 OPEN 帧转换为新的 RelayConnection 并通知用户处理器。
-func (r *Relay) acceptIncoming(env *RelayEnvelope) {
+func (r *Relay) acceptIncoming(env *RelayEnvelope, remotePeer UserRef) {
 	cfg := DefaultRelayConfig()
 	conn := &RelayConnection{
 		relay:         r,
 		relayID:       env.RelayID,
 		state:         RelayStateOpen,
 		config:        cfg,
-		remotePeer:    UserRef{}, // 从 OPEN 帧的 sender 信息推断
+		remotePeer:    remotePeer,
 		remoteSession: env.SenderSession,
 		mySession:     env.TargetSession,
 		sendCh:        make(chan []byte, cfg.SendBufferSize/1024),
@@ -175,7 +175,9 @@ func (r *Relay) acceptIncoming(env *RelayEnvelope) {
 		TargetSession: conn.remoteSession,
 		SentAtMs:      time.Now().UnixMilli(),
 	}
-	_ = conn.sendRelayEnvelope(openAckEnv)
+	go func() {
+		_ = conn.sendRelayEnvelope(openAckEnv)
+	}()
 
 	if handler != nil {
 		handler(conn)
@@ -196,7 +198,7 @@ func (r *Relay) handlePacket(p Packet) bool {
 	switch env.Kind {
 	case RelayKindOpen:
 		if !ok {
-			r.acceptIncoming(env)
+			r.acceptIncoming(env, p.Sender)
 		}
 		return true
 
@@ -439,7 +441,14 @@ func (c *RelayConnection) sendRelayEnvelope(env *RelayEnvelope) error {
 		mode = c.config.DeliveryMode
 	}
 
-	_, err = c.relay.client.SendPacket(c.ctx, SendPacketInput{
+	ctx := c.ctx
+	if timeout := c.relay.client.cfg.RequestTimeout; timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	_, err = c.relay.client.SendPacket(ctx, SendPacketInput{
 		Target:        c.remotePeer,
 		Body:          body,
 		DeliveryMode:  mode,
@@ -476,7 +485,9 @@ func (c *RelayConnection) handleData(env *RelayEnvelope) {
 			AckSeq:        env.Seq,
 			SentAtMs:      time.Now().UnixMilli(),
 		}
-		_ = c.sendRelayEnvelope(ackEnv)
+		go func() {
+			_ = c.sendRelayEnvelope(ackEnv)
+		}()
 		select {
 		case c.recvCh <- env.Payload:
 		case <-c.closeCh:
@@ -511,7 +522,9 @@ func (c *RelayConnection) handleData(env *RelayEnvelope) {
 			AckSeq:        env.Seq,
 			SentAtMs:      time.Now().UnixMilli(),
 		}
-		_ = c.sendRelayEnvelope(ackEnv)
+		go func() {
+			_ = c.sendRelayEnvelope(ackEnv)
+		}()
 	}
 }
 
@@ -548,7 +561,9 @@ func (c *RelayConnection) handlePing(env *RelayEnvelope) {
 		Payload:       nil,
 		SentAtMs:      time.Now().UnixMilli(),
 	}
-	_ = c.sendRelayEnvelope(errEnv)
+	go func() {
+		_ = c.sendRelayEnvelope(errEnv)
+	}()
 }
 
 func (c *RelayConnection) sendLoop() {
@@ -673,8 +688,8 @@ func (c *RelayConnection) retransmit() {
 
 func encodeRelayEnvelope(env *RelayEnvelope) ([]byte, error) {
 	pbEnv := &pb.RelayEnvelope{
-		RelayId:      env.RelayID,
-		Kind:         relayKindToProto(env.Kind),
+		RelayId: env.RelayID,
+		Kind:    relayKindToProto(env.Kind),
 		SenderSession: &pb.SessionRef{
 			ServingNodeId: env.SenderSession.ServingNodeID,
 			SessionId:     env.SenderSession.SessionID,

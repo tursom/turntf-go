@@ -506,6 +506,141 @@ func TestClientResolveUserSessionsAndTargetedPacket(t *testing.T) {
 	t.Fatalf("expected targeted packet push, got %+v", handler.packets)
 }
 
+func TestRelayIncomingOpenRepliesToPacketSender(t *testing.T) {
+	localUser := UserRef{NodeID: 4096, UserID: 1025}
+	remoteUser := UserRef{NodeID: 8192, UserID: 2048}
+	localSession := SessionRef{ServingNodeID: 4096, SessionID: "session-local"}
+	remoteSession := SessionRef{ServingNodeID: 8192, SessionID: "session-remote"}
+
+	accepted := make(chan *RelayConnection, 1)
+	checked := make(chan struct{}, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		_ = mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: localUser.NodeID, UserId: localUser.UserID, Username: "local", Role: "user"},
+					ProtocolVersion: "client-v1alpha1",
+					SessionRef:      sessionRefToProto(localSession),
+				},
+			},
+		})
+
+		openBody, err := encodeRelayEnvelope(&RelayEnvelope{
+			RelayID:       "relay-incoming-open",
+			Kind:          RelayKindOpen,
+			SenderSession: remoteSession,
+			TargetSession: localSession,
+			SentAtMs:      time.Now().UnixMilli(),
+		})
+		if err != nil {
+			t.Fatalf("encode relay open: %v", err)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_PacketPushed{
+				PacketPushed: &pb.PacketPushed{
+					Packet: &pb.Packet{
+						PacketId:      99,
+						SourceNodeId:  remoteUser.NodeID,
+						TargetNodeId:  localUser.NodeID,
+						Recipient:     userRefToProto(localUser),
+						Sender:        userRefToProto(remoteUser),
+						Body:          openBody,
+						DeliveryMode:  pb.ClientDeliveryMode_CLIENT_DELIVERY_MODE_ROUTE_RETRY,
+						TargetSession: sessionRefToProto(localSession),
+					},
+				},
+			},
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, payload, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read open ack send request: %v", err)
+		}
+		var sendReq pb.ClientEnvelope
+		if err := proto.Unmarshal(payload, &sendReq); err != nil {
+			t.Fatalf("unmarshal open ack send request: %v", err)
+		}
+		msg := sendReq.GetSendMessage()
+		if msg == nil {
+			t.Fatalf("expected send_message request, got %+v", sendReq.Body)
+		}
+		if got := userRefFromProto(msg.GetTarget()); got != remoteUser {
+			t.Fatalf("open ack target = %+v, want %+v", got, remoteUser)
+		}
+		if got := sessionRefFromProto(msg.GetTargetSession()); got != remoteSession {
+			t.Fatalf("open ack target_session = %+v, want %+v", got, remoteSession)
+		}
+
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_SendMessageResponse{
+				SendMessageResponse: &pb.SendMessageResponse{
+					RequestId: msg.GetRequestId(),
+					Body: &pb.SendMessageResponse_TransientAccepted{
+						TransientAccepted: &pb.TransientAccepted{
+							PacketId:      100,
+							SourceNodeId:  localUser.NodeID,
+							TargetNodeId:  remoteUser.NodeID,
+							Recipient:     userRefToProto(remoteUser),
+							DeliveryMode:  msg.GetDeliveryMode(),
+							TargetSession: sessionRefToProto(remoteSession),
+						},
+					},
+				},
+			},
+		})
+		checked <- struct{}{}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:        server.URL,
+		Credentials:    Credentials{NodeID: localUser.NodeID, UserID: localUser.UserID, Password: MustPlainPassword("local-password")},
+		CursorStore:    NewMemoryCursorStore(),
+		RequestTimeout: 2 * time.Second,
+		PingInterval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	client.Relay().OnConnection(func(conn *RelayConnection) {
+		accepted <- conn
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	select {
+	case conn := <-accepted:
+		if got := conn.RemotePeer(); got != remoteUser {
+			t.Fatalf("incoming remote peer = %+v, want %+v", got, remoteUser)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for incoming relay connection")
+	}
+
+	select {
+	case <-checked:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for open ack verification")
+	}
+}
+
 func TestClientUnauthorizedStopsReconnect(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
