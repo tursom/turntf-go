@@ -17,6 +17,8 @@ import (
 	pb "github.com/tursom/turntf-go/internal/proto"
 )
 
+const clientProtocolVersion = "client-v1alpha5"
+
 // Logger 是日志记录器接口，用于输出客户端内部日志（如重连、错误信息）。
 type Logger interface {
 	Printf(format string, args ...any)
@@ -1170,11 +1172,12 @@ func (c *Client) connectAndServe() error {
 	loginEnv := &pb.ClientEnvelope{
 		Body: &pb.ClientEnvelope_Login{
 			Login: &pb.LoginRequest{
-				User:          loginUser,
-				LoginName:     loginName,
-				Password:      c.cfg.Credentials.Password.WireValue(),
-				SeenMessages:  make([]*pb.MessageCursor, 0, len(seen)),
-				TransientOnly: c.cfg.TransientOnly,
+				User:            loginUser,
+				LoginName:       loginName,
+				Password:        c.cfg.Credentials.Password.WireValue(),
+				SeenMessages:    make([]*pb.MessageCursor, 0, len(seen)),
+				TransientOnly:   c.cfg.TransientOnly,
+				ProtocolVersion: clientProtocolVersion,
 			},
 		},
 	}
@@ -1247,6 +1250,17 @@ func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {
 func (c *Client) expectLogin(env *pb.ServerEnvelope) (LoginInfo, error) {
 	switch body := env.Body.(type) {
 	case *pb.ServerEnvelope_LoginResponse:
+		got := body.LoginResponse.GetProtocolVersion()
+		if got != clientProtocolVersion {
+			c.stateMu.Lock()
+			c.stopReconnect = true
+			c.stateMu.Unlock()
+			return LoginInfo{}, &ProtocolError{Message: fmt.Sprintf(
+				"unsupported login response protocol version: got=%q want=%q",
+				got,
+				clientProtocolVersion,
+			)}
+		}
 		return LoginInfo{
 			User:            userFromProto(body.LoginResponse.User),
 			ProtocolVersion: body.LoginResponse.ProtocolVersion,
@@ -1254,7 +1268,7 @@ func (c *Client) expectLogin(env *pb.ServerEnvelope) (LoginInfo, error) {
 		}, nil
 	case *pb.ServerEnvelope_Error:
 		c.stateMu.Lock()
-		c.stopReconnect = body.Error.Code == "unauthorized"
+		c.stopReconnect = body.Error.Code == "unauthorized" || body.Error.Code == "unsupported_protocol_version"
 		c.stateMu.Unlock()
 		return LoginInfo{}, &ServerError{
 			Code:      body.Error.Code,

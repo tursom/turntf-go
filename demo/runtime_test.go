@@ -103,7 +103,7 @@ func TestRunScenarioParallelCrossNodeMessage(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 8192, UserId: 2025, Username: "bob", Role: "user"},
-					ProtocolVersion: Version,
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -158,7 +158,7 @@ func TestRunScenarioParallelCrossNodeMessage(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
-					ProtocolVersion: Version,
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -233,7 +233,7 @@ script:
         user:
           node_id: 4096
           user_id: 1025
-        protocol_version: v1alpha1
+        protocol_version: client-v1alpha5
   - step: connect
     session: bob
     expect:
@@ -241,7 +241,7 @@ script:
         user:
           node_id: 8192
           user_id: 2025
-        protocol_version: v1alpha1
+        protocol_version: client-v1alpha5
   - step: parallel
     branches:
       - name: sender
@@ -329,7 +329,7 @@ func TestRunScenarioBlacklistAndDiscoveryFields(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1, Username: "root", Role: "admin"},
-					ProtocolVersion: "client-v1alpha2",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -462,7 +462,7 @@ script:
         user:
           node_id: 4096
           user_id: 1
-        protocol_version: client-v1alpha2
+        protocol_version: client-v1alpha5
 
   - step: request
     session: admin

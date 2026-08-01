@@ -97,6 +97,9 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 		defer conn.Close(websocket.StatusNormalClosure, "done")
 
 		login := mustReadClientEnvelope(t, conn)
+		if got := login.GetLogin().GetProtocolVersion(); got != "client-v1alpha5" {
+			t.Fatalf("login protocol_version = %q, want client-v1alpha5", got)
+		}
 		if got := login.GetLogin().GetUser(); got == nil || got.NodeId != 4096 || got.UserId != 1025 {
 			t.Fatalf("unexpected login user: %+v", got)
 		}
@@ -118,7 +121,7 @@ func TestClientLoginMessageAckSendAndPing(t *testing.T) {
 						LoginName: "alice.login",
 						Role:      "user",
 					},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 					SessionRef:      &pb.SessionRef{ServingNodeId: 4096, SessionId: "session-a"},
 				},
 			},
@@ -270,7 +273,7 @@ func TestClientLoginCanRequestTransientOnlySession(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -318,7 +321,7 @@ func TestClientRealtimeStreamDialsRealtimePath(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -370,7 +373,7 @@ func TestClientResolveUserSessionsAndTargetedPacket(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: targetUser.NodeID, UserId: targetUser.UserID, Username: "alice", Role: "user"},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 					SessionRef:      &pb.SessionRef{ServingNodeId: 4096, SessionId: "session-a"},
 				},
 			},
@@ -528,7 +531,7 @@ func TestRelayIncomingOpenRepliesToPacketSender(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: localUser.NodeID, UserId: localUser.UserID, Username: "local", Role: "user"},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 					SessionRef:      sessionRefToProto(localSession),
 				},
 			},
@@ -686,6 +689,128 @@ func TestClientUnauthorizedStopsReconnect(t *testing.T) {
 	_ = client.Close()
 }
 
+func TestClientUnsupportedProtocolVersionStopsReconnect(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusPolicyViolation, "unsupported protocol")
+		login := mustReadClientEnvelope(t, conn)
+		if got := login.GetLogin().GetProtocolVersion(); got != "client-v1alpha5" {
+			t.Fatalf("login protocol_version = %q, want client-v1alpha5", got)
+		}
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_Error{
+				Error: &pb.Error{
+					Code:      "unsupported_protocol_version",
+					Message:   "unsupported client protocol version",
+					RequestId: 0,
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:               server.URL,
+		Credentials:           Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("secret")},
+		Reconnect:             true,
+		InitialReconnectDelay: 10 * time.Millisecond,
+		MaxReconnectDelay:     20 * time.Millisecond,
+		PingInterval:          time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = client.Connect(ctx)
+	var serverErr *ServerError
+	if !errors.As(err, &serverErr) || serverErr.Code != "unsupported_protocol_version" {
+		t.Fatalf("expected unsupported protocol ServerError, got %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("expected 1 connection attempt, got %d", got)
+	}
+	if _, ok := client.CurrentLogin(); ok {
+		t.Fatal("protocol-rejected client must not enter authenticated state")
+	}
+	_ = client.Close()
+}
+
+func TestClientRejectsMismatchedLoginResponseVersionWithoutReconnect(t *testing.T) {
+	for _, version := range []string{"", "client-v1alpha4"} {
+		version := version
+		t.Run(version, func(t *testing.T) {
+			var attempts atomic.Int32
+			handler := &recordingHandler{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					t.Errorf("accept websocket: %v", err)
+					return
+				}
+				defer conn.Close(websocket.StatusPolicyViolation, "protocol mismatch")
+				login := mustReadClientEnvelope(t, conn)
+				if got := login.GetLogin().GetProtocolVersion(); got != "client-v1alpha5" {
+					t.Fatalf("login protocol_version = %q, want client-v1alpha5", got)
+				}
+				writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+					Body: &pb.ServerEnvelope_LoginResponse{
+						LoginResponse: &pb.LoginResponse{
+							User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
+							ProtocolVersion: version,
+						},
+					},
+				})
+			}))
+			defer server.Close()
+
+			client, err := NewClient(Config{
+				BaseURL:               server.URL,
+				Credentials:           Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("secret")},
+				Handler:               handler,
+				Reconnect:             true,
+				InitialReconnectDelay: 10 * time.Millisecond,
+				MaxReconnectDelay:     20 * time.Millisecond,
+				PingInterval:          time.Hour,
+			})
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err = client.Connect(ctx)
+			var protocolErr *ProtocolError
+			if !errors.As(err, &protocolErr) {
+				t.Fatalf("expected ProtocolError, got %v", err)
+			}
+			time.Sleep(100 * time.Millisecond)
+			if got := attempts.Load(); got != 1 {
+				t.Fatalf("expected 1 connection attempt, got %d", got)
+			}
+			if _, ok := client.CurrentLogin(); ok {
+				t.Fatal("version-mismatched response must not enter authenticated state")
+			}
+			handler.mu.Lock()
+			loginCount := len(handler.logins)
+			handler.mu.Unlock()
+			if loginCount != 0 {
+				t.Fatalf("version-mismatched response triggered %d login callbacks", loginCount)
+			}
+			_ = client.Close()
+		})
+	}
+}
+
 func TestClientListClusterQueries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -703,7 +828,7 @@ func TestClientListClusterQueries(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -812,7 +937,7 @@ func TestClientListUsersRPC(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", LoginName: "alice.login", Role: "user"},
-					ProtocolVersion: "client-v1alpha2",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -919,7 +1044,7 @@ func TestClientBlacklistAndOperationsStatusRPCs(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
-					ProtocolVersion: "client-v1alpha2",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -1076,7 +1201,7 @@ func TestClientUserMetadataRPCs(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
-					ProtocolVersion: "client-v1alpha2",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -1283,12 +1408,15 @@ func TestClientReconnectUsesSeenMessages(t *testing.T) {
 
 		attempt := attempts.Add(1)
 		login := mustReadClientEnvelope(t, conn)
+		if got := login.GetLogin().GetProtocolVersion(); got != "client-v1alpha5" {
+			t.Fatalf("attempt %d protocol_version = %q, want client-v1alpha5", attempt, got)
+		}
 
 		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -1370,7 +1498,7 @@ func TestClientUsesProvidedHashedPasswordForWSLogin(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -1423,11 +1551,12 @@ func TestClientCanConnectWithLoginNameSelector(t *testing.T) {
 						LoginName: "alice.login",
 						Role:      "user",
 					},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 					SessionRef:      &pb.SessionRef{ServingNodeId: 4096, SessionId: "session-login-name"},
 				},
 			},
 		})
+		_, _, _ = conn.Read(context.Background())
 	}))
 	defer server.Close()
 
@@ -1470,7 +1599,7 @@ func TestClientUpdateUserHashesPassword(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})
@@ -1537,7 +1666,7 @@ func TestClientUpdateUserCarriesLoginNameField(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", LoginName: "alice.login", Role: "user"},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})

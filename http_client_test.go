@@ -633,7 +633,7 @@ func TestIntegratedClientUsesHTTPLoginAndWSRPC(t *testing.T) {
 			Body: &pb.ServerEnvelope_LoginResponse{
 				LoginResponse: &pb.LoginResponse{
 					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", LoginName: "alice.login", Role: "user"},
-					ProtocolVersion: "client-v1alpha1",
+					ProtocolVersion: "client-v1alpha5",
 				},
 			},
 		})

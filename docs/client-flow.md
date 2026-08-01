@@ -146,7 +146,7 @@ if err := client.Connect(ctx); err != nil {
 1. 调 `LoadSeenMessages()`
 2. 拨号 `/ws/client` 或 `/ws/realtime`
 3. 发送首帧 `ClientEnvelope.login`
-4. 等待 `login_response`
+4. 等待 `login_response` 并校验服务端确认为 `client-v1alpha5`
 5. 保存当前 `session_ref`
 6. 触发 `OnLogin()`
 
@@ -157,6 +157,7 @@ ClientEnvelope {
   login: LoginRequest {
     user: { node_id: 4096, user_id: 1025 }
     password: "$2a$10$..."
+    protocol_version: "client-v1alpha5"
     seen_messages: []
   }
 }
@@ -366,7 +367,7 @@ default:
 - `OnError()`：协议错误、持久化错误、重连中的读写错误都会从这里暴露
 - `OnDisconnect()`：每次连接断开都会触发
 
-登录阶段若收到 `unauthorized`，当前实现会停止自动重连。
+登录阶段若收到 `unauthorized` 或 `unsupported_protocol_version`，当前实现会停止自动重连。成功响应中的版本为空或不是 `client-v1alpha5` 时返回 `ProtocolError`，同样不会进入登录状态或重连。
 
 ## 13. 常见场景清单
 

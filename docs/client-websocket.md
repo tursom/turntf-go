@@ -111,6 +111,7 @@ ClientEnvelope {
   login: LoginRequest {
     user: { node_id: 4096, user_id: 1025 }
     password: "$2a$10$..."
+    protocol_version: "client-v1alpha5"
     seen_messages: [
       { node_id: 4096, seq: 1 },
       { node_id: 4097, seq: 8 }
@@ -127,6 +128,7 @@ ClientEnvelope {
   login: LoginRequest {
     login_name: "alice.login"
     password: "$2a$10$..."
+    protocol_version: "client-v1alpha5"
     seen_messages: []
     transient_only: false
   }
@@ -138,6 +140,7 @@ ClientEnvelope {
 - `user`：旧式登录身份选择器，和 `login_name` 二选一
 - `login_name`：新增登录名选择器，和 `user` 二选一
 - `password`：密码哈希。`turntf-go` 的 `MustPlainPassword` / `PlainPassword` 会先做 bcrypt，再把哈希串写到线上请求
+- `protocol_version`：SDK 内部固定发送 `client-v1alpha5`，不提供配置项；初连和自动重连都会携带
 - `seen_messages`：客户端已经安全持久化的消息游标集合
 - `transient_only`：为 `true` 时跳过持久化消息补发和后续持久化消息推送，但仍可接收瞬时包
 
@@ -153,7 +156,7 @@ ServerEnvelope {
       login_name: "alice.login"
       role: "user"
     }
-    protocol_version: "client-v1alpha1"
+    protocol_version: "client-v1alpha5"
     session_ref: {
       serving_node_id: 4096
       session_id: "session-a"
@@ -168,6 +171,8 @@ ServerEnvelope {
 - 其他客户端通过 `resolve_user_sessions` 查询在线 session
 - 定向瞬时包时写入 `target_session`
 
+SDK 会先确认 `LoginResponse.protocol_version` 精确等于 `client-v1alpha5`，再保存连接状态、`session_ref` 并触发 `OnLogin`。空值或其他版本会返回 `*ProtocolError`，关闭当前连接并停止自动重连。
+
 ### 登录失败
 
 登录失败时，服务端返回：
@@ -181,7 +186,7 @@ ServerEnvelope {
 }
 ```
 
-随后关闭连接。`turntf-go` 当前会在登录阶段收到 `unauthorized` 时停止自动重连。
+随后关闭连接。`turntf-go` 在登录阶段收到 `unauthorized` 或 `unsupported_protocol_version` 时都会停止自动重连；后者保持为 `*ServerError`。
 
 ## `seen_messages`、游标和 `AckMessage`
 
@@ -558,6 +563,7 @@ ServerEnvelope {
 常见 `code`：
 
 - `unauthorized`：登录失败、首帧不是登录、登录解码失败
+- `unsupported_protocol_version`：客户端声明的 wire epoch 与服务端要求不一致；登录阶段为终止性错误
 - `invalid_frame`：发送了非 binary frame
 - `invalid_protobuf`：binary frame 不是合法 `ClientEnvelope`
 - `invalid_message`：发送了不支持的客户端消息

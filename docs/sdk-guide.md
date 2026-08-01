@@ -106,9 +106,9 @@
 
 1. 从 `CursorStore.LoadSeenMessages()` 读取本地已持久化游标。
 2. 连接 `/ws/client` 或 `/ws/realtime`。
-3. 发送 `ClientEnvelope.login`。
+3. 发送带固定 `protocol_version = "client-v1alpha5"` 的 `ClientEnvelope.login`。
 4. 等待第一条服务端消息，必须是 `login_response` 或 `error`。
-5. 登录成功后设置内部连接状态，触发 `Handler.OnLogin()`。
+5. 校验 `LoginResponse.protocol_version` 后设置内部连接状态，触发 `Handler.OnLogin()`。
 6. 启动读循环和应用层 Ping 循环。
 
 `Connect(ctx)` 只等待“第一次连接结果”：
@@ -134,7 +134,7 @@ type Handler interface {
 `LoginInfo` 中最重要的字段：
 
 - `User`：当前登录用户
-- `ProtocolVersion`：当前客户端协议版本
+- `ProtocolVersion`：服务端确认的客户端协议版本，成功时固定为 `client-v1alpha5`
 - `SessionRef`：当前这一次连接在服务端注册出来的在线 session
 
 ### 5.4 `CurrentLogin`
@@ -225,7 +225,7 @@ messages primary key: (node_id, seq)
 
 - 起点由 `InitialReconnectDelay` 控制
 - 上限由 `MaxReconnectDelay` 控制
-- 登录阶段收到 `unauthorized` 时会停止自动重连
+- 登录阶段收到 `unauthorized`、`unsupported_protocol_version`，或收到版本不匹配的成功响应时会停止自动重连
 
 重连时 SDK 会再次执行完整登录流程，并重新上报 `seen_messages`。
 
