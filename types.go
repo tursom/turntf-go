@@ -447,6 +447,7 @@ const (
 	RelayErrorNotConnected   = "not_connected"
 	RelayErrorSendTimeout    = "send_timeout"
 	RelayErrorReceiveTimeout = "receive_timeout"
+	RelayErrorCloseTimeout   = "close_timeout"
 )
 
 // CreateUserRequest 是创建用户或频道的请求参数。

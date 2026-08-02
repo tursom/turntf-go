@@ -85,9 +85,12 @@ func (r *Relay) Connect(ctx context.Context, target UserRef, config *RelayConfig
 		recvCh:        make(chan []byte, 64),
 		closeCh:       make(chan struct{}),
 		openCh:        make(chan struct{}),
+		flushCh:       make(chan struct{}),
 		unacked:       make(map[uint64]unackedFrame),
 		recvBuf:       make(map[uint64][]byte),
 		expectedSeq:   1,
+		sendBase:      1,
+		nextSeq:       1,
 	}
 	conn.ctx, conn.cancel = context.WithCancel(context.Background())
 
@@ -140,6 +143,7 @@ func (r *Relay) acceptIncoming(env *RelayEnvelope, remotePeer UserRef) {
 		recvCh:        make(chan []byte, 64),
 		closeCh:       make(chan struct{}),
 		openCh:        make(chan struct{}),
+		flushCh:       make(chan struct{}),
 		unacked:       make(map[uint64]unackedFrame),
 		recvBuf:       make(map[uint64][]byte),
 		expectedSeq:   1,
@@ -203,12 +207,14 @@ func (r *Relay) handlePacket(p Packet) bool {
 		return true
 
 	case RelayKindOpenAck:
-		if ok && conn.state == RelayStateOpening {
+		if ok {
 			conn.mu.Lock()
-			conn.state = RelayStateOpen
-			conn.remoteSession = env.SenderSession
+			if conn.state == RelayStateOpening {
+				conn.state = RelayStateOpen
+				conn.remoteSession = env.SenderSession
+				close(conn.openCh)
+			}
 			conn.mu.Unlock()
-			close(conn.openCh)
 		}
 		return true
 
@@ -239,6 +245,19 @@ func (r *Relay) removeConnection(relayID string) {
 	r.mu.Unlock()
 }
 
+func (r *Relay) closeAll(reason error) {
+	r.mu.Lock()
+	conns := make([]*RelayConnection, 0, len(r.conns))
+	for _, conn := range r.conns {
+		conns = append(conns, conn)
+	}
+	r.mu.Unlock()
+
+	for _, conn := range conns {
+		conn.handleClose(reason)
+	}
+}
+
 type unackedFrame struct {
 	data       []byte
 	retransmit int
@@ -246,11 +265,12 @@ type unackedFrame struct {
 
 // RelayConnection 表示一条 relay 点对点连接，提供可靠或尽力而为的数据传输。
 type RelayConnection struct {
-	relay   *Relay
-	relayID string
-	mu      sync.Mutex
-	state   RelayState
-	config  RelayConfig
+	relay     *Relay
+	relayID   string
+	enqueueMu sync.Mutex
+	mu        sync.Mutex
+	state     RelayState
+	config    RelayConfig
 
 	remotePeer    UserRef
 	remoteSession SessionRef
@@ -267,12 +287,16 @@ type RelayConnection struct {
 	recvCh  chan []byte
 	closeCh chan struct{}
 	openCh  chan struct{}
+	flushCh chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	onClose []func(error)
+	onClose  []func(error)
+	closeErr error
+
+	sendEnvelope func(*RelayEnvelope) error
 }
 
 // RelayID 返回连接的唯一标识。
@@ -298,6 +322,9 @@ func (c *RelayConnection) Send(data []byte) error {
 		return nil
 	}
 
+	c.enqueueMu.Lock()
+	defer c.enqueueMu.Unlock()
+
 	c.mu.Lock()
 	state := c.state
 	c.mu.Unlock()
@@ -306,9 +333,10 @@ func (c *RelayConnection) Send(data []byte) error {
 		return &RelayError{Code: RelayErrorNotConnected, Message: "connection not open"}
 	}
 
+	owned := append([]byte(nil), data...)
 	if c.config.SendTimeoutMs <= 0 {
 		select {
-		case c.sendCh <- data:
+		case c.sendCh <- owned:
 			return nil
 		case <-c.closeCh:
 			return &RelayError{Code: RelayErrorClientClosed, Message: "connection closed"}
@@ -319,7 +347,7 @@ func (c *RelayConnection) Send(data []byte) error {
 
 	timeout := time.Duration(c.config.SendTimeoutMs) * time.Millisecond
 	select {
-	case c.sendCh <- data:
+	case c.sendCh <- owned:
 		return nil
 	case <-time.After(timeout):
 		return &RelayError{Code: RelayErrorSendTimeout, Message: "send timeout waiting for buffer space"}
@@ -366,20 +394,86 @@ func (c *RelayConnection) ReceiveTimeout(timeout time.Duration) ([]byte, error) 
 
 // OnClose 注册连接关闭回调。
 func (c *RelayConnection) OnClose(fn func(error)) {
+	if fn == nil {
+		return
+	}
 	c.mu.Lock()
+	if c.state == RelayStateClosed {
+		reason := c.closeErr
+		c.mu.Unlock()
+		fn(reason)
+		return
+	}
 	c.onClose = append(c.onClose, fn)
 	c.mu.Unlock()
 }
 
 // Close 优雅关闭连接，发送 CLOSE 帧并等待确认。
 func (c *RelayConnection) Close() error {
+	c.enqueueMu.Lock()
 	c.mu.Lock()
 	if c.state != RelayStateOpen {
 		c.mu.Unlock()
+		c.enqueueMu.Unlock()
 		return nil
 	}
 	c.state = RelayStateClosing
 	c.mu.Unlock()
+	timeout := time.Duration(c.config.CloseTimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	timeoutError := &RelayError{Code: RelayErrorCloseTimeout, Message: "close timeout waiting for queued data acknowledgement"}
+
+	select {
+	case c.sendCh <- nil:
+		c.enqueueMu.Unlock()
+	case <-c.closeCh:
+		c.enqueueMu.Unlock()
+		return nil
+	case <-c.ctx.Done():
+		c.enqueueMu.Unlock()
+		return c.ctx.Err()
+	case <-timer.C:
+		c.enqueueMu.Unlock()
+		c.handleClose(timeoutError)
+		return timeoutError
+	}
+	select {
+	case <-c.flushCh:
+	case <-c.closeCh:
+		return nil
+	case <-c.ctx.Done():
+		return c.ctx.Err()
+	case <-timer.C:
+		c.handleClose(timeoutError)
+		return timeoutError
+	}
+
+	if c.config.Reliability != ReliabilityBestEffort {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			c.mu.Lock()
+			pending := len(c.unacked)
+			c.mu.Unlock()
+			if pending == 0 {
+				break
+			}
+			select {
+			case <-ticker.C:
+			case <-c.closeCh:
+				return nil
+			case <-c.ctx.Done():
+				return c.ctx.Err()
+			case <-timer.C:
+				c.handleClose(timeoutError)
+				return timeoutError
+			}
+		}
+	}
 
 	closeEnv := &RelayEnvelope{
 		RelayID:       c.relayID,
@@ -388,7 +482,10 @@ func (c *RelayConnection) Close() error {
 		TargetSession: c.remoteSession,
 		SentAtMs:      time.Now().UnixMilli(),
 	}
-	_ = c.sendRelayEnvelope(closeEnv)
+	if err := c.sendRelayEnvelope(closeEnv); err != nil {
+		c.handleClose(err)
+		return err
+	}
 
 	c.handleClose(nil)
 	return nil
@@ -410,6 +507,7 @@ func (c *RelayConnection) handleClose(reason error) {
 		return
 	}
 	c.state = RelayStateClosed
+	c.closeErr = reason
 	callbacks := make([]func(error), len(c.onClose))
 	copy(callbacks, c.onClose)
 	c.mu.Unlock()
@@ -421,8 +519,6 @@ func (c *RelayConnection) handleClose(reason error) {
 		close(c.closeCh)
 	}
 
-	c.wg.Wait()
-
 	for _, fn := range callbacks {
 		fn(reason)
 	}
@@ -431,6 +527,9 @@ func (c *RelayConnection) handleClose(reason error) {
 }
 
 func (c *RelayConnection) sendRelayEnvelope(env *RelayEnvelope) error {
+	if c.sendEnvelope != nil {
+		return c.sendEnvelope(env)
+	}
 	body, err := encodeRelayEnvelope(env)
 	if err != nil {
 		return err
@@ -494,13 +593,14 @@ func (c *RelayConnection) handleData(env *RelayEnvelope) {
 		}
 
 	case ReliabilityReliableOrdered:
+		var ready [][]byte
 		c.mu.Lock()
 		if env.Seq == c.expectedSeq {
-			c.deliverOrdered(env.Payload)
+			ready = append(ready, env.Payload)
 			c.expectedSeq++
 			for {
 				if data, ok := c.recvBuf[c.expectedSeq]; ok {
-					c.deliverOrdered(data)
+					ready = append(ready, data)
 					delete(c.recvBuf, c.expectedSeq)
 					c.expectedSeq++
 				} else {
@@ -512,14 +612,24 @@ func (c *RelayConnection) handleData(env *RelayEnvelope) {
 				c.recvBuf[env.Seq] = env.Payload
 			}
 		}
+		ackSeq := c.expectedSeq - 1
 		c.mu.Unlock()
+
+		for _, data := range ready {
+			if !c.deliverOrdered(data) {
+				return
+			}
+		}
+		if ackSeq == 0 {
+			return
+		}
 
 		ackEnv := &RelayEnvelope{
 			RelayID:       c.relayID,
 			Kind:          RelayKindAck,
 			SenderSession: c.mySession,
 			TargetSession: c.remoteSession,
-			AckSeq:        env.Seq,
+			AckSeq:        ackSeq,
 			SentAtMs:      time.Now().UnixMilli(),
 		}
 		go func() {
@@ -528,10 +638,14 @@ func (c *RelayConnection) handleData(env *RelayEnvelope) {
 	}
 }
 
-func (c *RelayConnection) deliverOrdered(data []byte) {
+func (c *RelayConnection) deliverOrdered(data []byte) bool {
 	select {
 	case c.recvCh <- data:
-	default:
+		return true
+	case <-c.closeCh:
+		return false
+	case <-c.ctx.Done():
+		return false
 	}
 }
 
@@ -587,6 +701,10 @@ func (c *RelayConnection) sendLoop() {
 		case data, ok := <-c.sendCh:
 			if !ok {
 				return
+			}
+			if data == nil {
+				close(c.flushCh)
+				continue
 			}
 			c.mu.Lock()
 			if c.config.Reliability == ReliabilityBestEffort {

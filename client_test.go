@@ -509,6 +509,64 @@ func TestClientResolveUserSessionsAndTargetedPacket(t *testing.T) {
 	t.Fatalf("expected targeted packet push, got %+v", handler.packets)
 }
 
+func TestClientResolveUserSessionsReturnsServerError(t *testing.T) {
+	target := UserRef{NodeID: 8192, UserID: 2048}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		_ = mustReadClientEnvelope(t, conn)
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_LoginResponse{
+				LoginResponse: &pb.LoginResponse{
+					User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "client", Role: "user"},
+					ProtocolVersion: "client-v1alpha5",
+					SessionRef:      &pb.SessionRef{ServingNodeId: 4096, SessionId: "session-client"},
+				},
+			},
+		})
+
+		request := mustReadClientEnvelope(t, conn).GetResolveUserSessions()
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{
+			Body: &pb.ServerEnvelope_Error{
+				Error: &pb.Error{
+					Code:      "forbidden",
+					Message:   "target is not communicable",
+					RequestId: request.GetRequestId(),
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:        server.URL,
+		Credentials:    Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("password")},
+		CursorStore:    NewMemoryCursorStore(),
+		RequestTimeout: 2 * time.Second,
+		PingInterval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	_, err = client.ResolveUserSessions(ctx, target)
+	var serverErr *ServerError
+	if !errors.As(err, &serverErr) || serverErr.Code != "forbidden" {
+		t.Fatalf("ResolveUserSessions error = %v, want forbidden ServerError", err)
+	}
+}
+
 func TestRelayIncomingOpenRepliesToPacketSender(t *testing.T) {
 	localUser := UserRef{NodeID: 4096, UserID: 1025}
 	remoteUser := UserRef{NodeID: 8192, UserID: 2048}
@@ -1396,7 +1454,7 @@ func TestClientSendPacketRejectsInvalidTargetSession(t *testing.T) {
 func TestClientReconnectUsesSeenMessages(t *testing.T) {
 	store := &recordingStore{}
 	var attempts atomic.Int32
-	var secondSeen []*pb.MessageCursor
+	secondSeen := make(chan []*pb.MessageCursor, 1)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -1441,7 +1499,7 @@ func TestClientReconnectUsesSeenMessages(t *testing.T) {
 			return
 		}
 
-		secondSeen = append([]*pb.MessageCursor(nil), login.GetLogin().SeenMessages...)
+		secondSeen <- append([]*pb.MessageCursor(nil), login.GetLogin().SeenMessages...)
 	}))
 	defer server.Close()
 
@@ -1474,8 +1532,14 @@ func TestClientReconnectUsesSeenMessages(t *testing.T) {
 	if attempts.Load() < 2 {
 		t.Fatalf("expected reconnect attempt, got %d", attempts.Load())
 	}
-	if len(secondSeen) != 1 || secondSeen[0].NodeId != 4096 || secondSeen[0].Seq != 11 {
-		t.Fatalf("unexpected seen_messages on reconnect: %#v", secondSeen)
+	var seen []*pb.MessageCursor
+	select {
+	case seen = <-secondSeen:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for reconnect login")
+	}
+	if len(seen) != 1 || seen[0].NodeId != 4096 || seen[0].Seq != 11 {
+		t.Fatalf("unexpected seen_messages on reconnect: %#v", seen)
 	}
 	_ = client.Close()
 }

@@ -370,6 +370,7 @@ func (c *Client) Close() error {
 	c.stateMu.Unlock()
 
 	c.cancel()
+	c.Relay().closeAll(ErrClosed)
 	if conn != nil {
 		conn.Close(websocket.StatusNormalClosure, "client closed")
 	}
@@ -1225,6 +1226,7 @@ func (c *Client) connectAndServe() error {
 	c.stateMu.Unlock()
 
 	c.failAllPending(ErrDisconnected)
+	c.Relay().closeAll(ErrDisconnected)
 	c.cfg.Handler.OnDisconnect(c.ctx, readErr)
 	_ = conn.Close(websocket.StatusNormalClosure, "disconnect")
 	return readErr
@@ -1583,7 +1585,7 @@ func websocketURL(base string, realtime bool) (string, error) {
 func waitRequest(ctx context.Context, ch <-chan requestResult) (requestResult, error) {
 	select {
 	case res := <-ch:
-		return res, nil
+		return res, res.err
 	case <-ctx.Done():
 		return requestResult{}, ctx.Err()
 	}
