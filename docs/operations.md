@@ -16,6 +16,12 @@
 - 将 `GET /healthz` 接入存活探针，将 `GET /metrics` 接入带管理员 Bearer token 的指标抓取。
 - 控制台日志为易读文本；如需持久化结构化日志，配置 `logging.file_path` 写入 JSON 行文件，并由 logrotate、容器运行时或日志平台负责轮转。
 
+## SDK 共享连接边界
+
+- Go SDK 对完整 WebSocket 消息设置 1 MiB 接收上限，首次连接与重连均生效。32 KiB Relay 数据还包含多层协议封装，不能直接采用 WebSocket 库默认的 32 KiB 上限；超过 1 MiB 的响应仍会触发连接关闭，大型聚合响应需控制大小。
+- RPC 或 Relay 的调用方取消不会中断已经开始的共享 WebSocket 帧写入。写入受客户端生命周期和独立的 `RequestTimeout` 约束；`Client.Close()` 或真实写超时仍可终止连接。取得写锁后发现调用已取消时，不发送该帧。
+- `RequestTimeout` 的独立写预算从取得写锁后开始，不包含不可取消的写锁排队时间；RPC 响应等待仍使用调用方 context。取消不代表服务端操作已撤销，返回取消或超时后不能盲目重试非幂等请求。
+
 ## 运维接口
 
 - `GET /healthz`：公开存活检查，只返回服务进程是否可响应。
