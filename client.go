@@ -1494,6 +1494,10 @@ func (c *Client) rpc(ctx context.Context, build func(uint64) *pb.ClientEnvelope)
 		return requestResult{}, err
 	}
 	defer c.unregisterPending(requestID)
+	// A caller can leave while a shared frame write is still queued or in
+	// progress. Release its response slot without canceling that shared write.
+	stopCleanup := context.AfterFunc(ctx, func() { c.unregisterPending(requestID) })
+	defer stopCleanup()
 
 	if err := c.sendEnvelope(ctx, build(requestID)); err != nil {
 		return requestResult{}, err

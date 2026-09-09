@@ -81,7 +81,7 @@ func (r *Relay) Connect(ctx context.Context, target UserRef, config *RelayConfig
 		remotePeer:    target,
 		remoteSession: targetSession,
 		mySession:     r.client.loginInfo.SessionRef,
-		sendCh:        make(chan []byte, cfg.SendBufferSize/1024),
+		sendCh:        make(chan relaySendItem, cfg.SendBufferSize/1024),
 		recvCh:        make(chan []byte, 64),
 		closeCh:       make(chan struct{}),
 		openCh:        make(chan struct{}),
@@ -106,9 +106,7 @@ func (r *Relay) Connect(ctx context.Context, target UserRef, config *RelayConfig
 		SentAtMs:      time.Now().UnixMilli(),
 	}
 	if err := conn.sendRelayEnvelope(openEnv); err != nil {
-		r.mu.Lock()
-		delete(r.conns, relayID)
-		r.mu.Unlock()
+		conn.abort(err)
 		return nil, fmt.Errorf("relay: send OPEN: %w", err)
 	}
 
@@ -119,6 +117,8 @@ func (r *Relay) Connect(ctx context.Context, target UserRef, config *RelayConfig
 	select {
 	case <-conn.openCh:
 		return conn, nil
+	case <-conn.closeCh:
+		return nil, conn.closeResult()
 	case <-time.After(openTimeout):
 		conn.abort(&RelayError{Code: RelayErrorOpenTimeout, Message: "OPEN timeout waiting for OPEN_ACK"})
 		return nil, &RelayError{Code: RelayErrorOpenTimeout, Message: "OPEN timeout waiting for OPEN_ACK"}
@@ -139,7 +139,7 @@ func (r *Relay) acceptIncoming(env *RelayEnvelope, remotePeer UserRef) {
 		remotePeer:    remotePeer,
 		remoteSession: env.SenderSession,
 		mySession:     env.TargetSession,
-		sendCh:        make(chan []byte, cfg.SendBufferSize/1024),
+		sendCh:        make(chan relaySendItem, cfg.SendBufferSize/1024),
 		recvCh:        make(chan []byte, 64),
 		closeCh:       make(chan struct{}),
 		openCh:        make(chan struct{}),
@@ -184,7 +184,7 @@ func (r *Relay) acceptIncoming(env *RelayEnvelope, remotePeer UserRef) {
 	}()
 
 	if handler != nil {
-		handler(conn)
+		go handler(conn)
 	}
 }
 
@@ -206,33 +206,9 @@ func (r *Relay) handlePacket(p Packet) bool {
 		}
 		return true
 
-	case RelayKindOpenAck:
-		if ok {
-			conn.mu.Lock()
-			if conn.state == RelayStateOpening {
-				conn.state = RelayStateOpen
-				conn.remoteSession = env.SenderSession
-				close(conn.openCh)
-			}
-			conn.mu.Unlock()
-		}
-		return true
-
-	case RelayKindClose:
-		if ok {
-			conn.handleClose(&RelayError{Code: RelayErrorRemoteClose, Message: "remote peer closed connection"})
-		}
-		return true
-
-	case RelayKindError:
-		if ok {
-			conn.handleClose(&RelayError{Code: RelayErrorProtocol, Message: "remote peer error: " + string(env.Payload)})
-		}
-		return true
-
 	default:
 		if ok {
-			conn.handleEnvelope(env)
+			conn.enqueueEnvelope(env)
 		}
 		return true
 	}
@@ -254,7 +230,7 @@ func (r *Relay) closeAll(reason error) {
 	r.mu.Unlock()
 
 	for _, conn := range conns {
-		conn.handleClose(reason)
+		conn.closeConnection(reason, true)
 	}
 }
 
@@ -267,7 +243,7 @@ type unackedFrame struct {
 type RelayConnection struct {
 	relay     *Relay
 	relayID   string
-	enqueueMu sync.Mutex
+	enqueueMu cancelMutex
 	mu        sync.Mutex
 	state     RelayState
 	config    RelayConfig
@@ -276,25 +252,43 @@ type RelayConnection struct {
 	remoteSession SessionRef
 	mySession     SessionRef
 
-	sendBase    uint64
-	nextSeq     uint64
-	unacked     map[uint64]unackedFrame
-	expectedSeq uint64
-	recvBuf     map[uint64][]byte
-	retransCnt  int
+	sendBase      uint64
+	nextSeq       uint64
+	unacked       map[uint64]unackedFrame
+	expectedSeq   uint64
+	recvBuf       map[uint64][]byte
+	recvReady     int    // Frames removed from recvBuf but not yet delivered to recvCh.
+	recvDelivered uint64 // Last cumulative receive ACK eligible after full batch delivery.
+	retransCnt    int
 
-	sendCh  chan []byte
+	sendCh  chan relaySendItem
 	recvCh  chan []byte
 	closeCh chan struct{}
 	openCh  chan struct{}
 	flushCh chan struct{}
+	ackCh   chan struct{} // Coalesced window-progress notification, guarded by mu.
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	onClose  []func(error)
-	closeErr error
+	onClose      []func(error)
+	closeErr     error
+	remoteClosed bool
+
+	// Admission includes the frame currently blocked on delivery.
+	inboxMu       sync.Mutex
+	inbox         chan *RelayEnvelope
+	inboxSeq      map[uint64]bool
+	inboxData     int
+	inboxFailed   bool
+	inboxTerminal bool // ACK fast path stops at the first admitted CLOSE/ERROR.
+	ackIdle       chan struct{}
+	ackOut        chan struct{}
+	ackPending    *RelayEnvelope
+	ackGenerating int
+	ackSending    bool
+	ackOnce       sync.Once
 
 	sendEnvelope func(*RelayEnvelope) error
 }
@@ -336,7 +330,7 @@ func (c *RelayConnection) Send(data []byte) error {
 	owned := append([]byte(nil), data...)
 	if c.config.SendTimeoutMs <= 0 {
 		select {
-		case c.sendCh <- owned:
+		case c.sendCh <- relaySendItem{data: owned}:
 			return nil
 		case <-c.closeCh:
 			return &RelayError{Code: RelayErrorClientClosed, Message: "connection closed"}
@@ -347,7 +341,7 @@ func (c *RelayConnection) Send(data []byte) error {
 
 	timeout := time.Duration(c.config.SendTimeoutMs) * time.Millisecond
 	select {
-	case c.sendCh <- owned:
+	case c.sendCh <- relaySendItem{data: owned}:
 		return nil
 	case <-time.After(timeout):
 		return &RelayError{Code: RelayErrorSendTimeout, Message: "send timeout waiting for buffer space"}
@@ -362,6 +356,7 @@ func (c *RelayConnection) Send(data []byte) error {
 func (c *RelayConnection) Receive() <-chan []byte { return c.recvCh }
 
 // ReceiveTimeout 从连接读取数据，支持超时。timeout 为 0 时无限等待。
+// 正常远端 CLOSE 后先排空已接受的数据；Abort 和其他错误不启用排空。
 func (c *RelayConnection) ReceiveTimeout(timeout time.Duration) ([]byte, error) {
 	if timeout <= 0 {
 		select {
@@ -371,9 +366,9 @@ func (c *RelayConnection) ReceiveTimeout(timeout time.Duration) ([]byte, error) 
 			}
 			return data, nil
 		case <-c.closeCh:
-			return nil, &RelayError{Code: RelayErrorClientClosed, Message: "connection closed"}
+			return c.receiveTerminal(&RelayError{Code: RelayErrorClientClosed, Message: "connection closed"})
 		case <-c.ctx.Done():
-			return nil, c.ctx.Err()
+			return c.receiveTerminal(c.ctx.Err())
 		}
 	}
 
@@ -386,10 +381,28 @@ func (c *RelayConnection) ReceiveTimeout(timeout time.Duration) ([]byte, error) 
 	case <-time.After(timeout):
 		return nil, &RelayError{Code: RelayErrorReceiveTimeout, Message: "receive timeout"}
 	case <-c.closeCh:
-		return nil, &RelayError{Code: RelayErrorClientClosed, Message: "connection closed"}
+		return c.receiveTerminal(&RelayError{Code: RelayErrorClientClosed, Message: "connection closed"})
 	case <-c.ctx.Done():
-		return nil, c.ctx.Err()
+		return c.receiveTerminal(c.ctx.Err())
 	}
+}
+
+func (c *RelayConnection) receiveTerminal(fallback error) ([]byte, error) {
+	c.mu.Lock()
+	remoteClosed := c.remoteClosed
+	c.mu.Unlock()
+	// FIFO dispatch processes remote CLOSE only after publishing its DATA
+	// prefix. No producer can add later DATA, so a nonblocking drain suffices.
+	if remoteClosed {
+		select {
+		case data, ok := <-c.recvCh:
+			if ok {
+				return data, nil
+			}
+		default:
+		}
+	}
+	return nil, fallback
 }
 
 // OnClose 注册连接关闭回调。
@@ -410,46 +423,42 @@ func (c *RelayConnection) OnClose(fn func(error)) {
 
 // Close 优雅关闭连接，发送 CLOSE 帧并等待确认。
 func (c *RelayConnection) Close() error {
-	c.enqueueMu.Lock()
-	c.mu.Lock()
-	if c.state != RelayStateOpen {
-		c.mu.Unlock()
-		c.enqueueMu.Unlock()
-		return nil
-	}
-	c.state = RelayStateClosing
-	c.mu.Unlock()
 	timeout := time.Duration(c.config.CloseTimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	timeoutError := &RelayError{Code: RelayErrorCloseTimeout, Message: "close timeout waiting for queued data acknowledgement"}
+	// The same deadline releases a Send holding enqueueMu and cancels ACK/CLOSE
+	// acceptance RPCs. User callbacks cannot extend the deadline.
+	deadline := time.AfterFunc(timeout, func() { c.closeConnection(timeoutError, true) })
+	defer deadline.Stop()
+	c.enqueueMu.Lock()
+	c.mu.Lock()
+	if c.state != RelayStateOpen {
+		err := c.closeErr
+		c.mu.Unlock()
+		c.enqueueMu.Unlock()
+		return err
+	}
+	c.state = RelayStateClosing
+	c.mu.Unlock()
 
 	select {
-	case c.sendCh <- nil:
+	case c.sendCh <- relaySendItem{}:
 		c.enqueueMu.Unlock()
 	case <-c.closeCh:
 		c.enqueueMu.Unlock()
-		return nil
+		return c.closeResult()
 	case <-c.ctx.Done():
 		c.enqueueMu.Unlock()
-		return c.ctx.Err()
-	case <-timer.C:
-		c.enqueueMu.Unlock()
-		c.handleClose(timeoutError)
-		return timeoutError
+		return c.closeResult()
 	}
 	select {
 	case <-c.flushCh:
 	case <-c.closeCh:
-		return nil
+		return c.closeResult()
 	case <-c.ctx.Done():
-		return c.ctx.Err()
-	case <-timer.C:
-		c.handleClose(timeoutError)
-		return timeoutError
+		return c.closeResult()
 	}
 
 	if c.config.Reliability != ReliabilityBestEffort {
@@ -465,16 +474,17 @@ func (c *RelayConnection) Close() error {
 			select {
 			case <-ticker.C:
 			case <-c.closeCh:
-				return nil
+				return c.closeResult()
 			case <-c.ctx.Done():
-				return c.ctx.Err()
-			case <-timer.C:
-				c.handleClose(timeoutError)
-				return timeoutError
+				return c.closeResult()
 			}
 		}
 	}
 
+	c.waitReceiveACK()
+	if c.ctx.Err() != nil {
+		return c.closeResult()
+	}
 	closeEnv := &RelayEnvelope{
 		RelayID:       c.relayID,
 		Kind:          RelayKindClose,
@@ -482,13 +492,38 @@ func (c *RelayConnection) Close() error {
 		TargetSession: c.remoteSession,
 		SentAtMs:      time.Now().UnixMilli(),
 	}
-	if err := c.sendRelayEnvelope(closeEnv); err != nil {
-		c.handleClose(err)
+	// The shared WS write cannot be interrupted by a Relay deadline. Keep this
+	// single terminal RPC bounded by the client write budget without making
+	// the caller wait beyond CloseTimeout. The buffered result cannot strand
+	// the worker after the caller leaves on cancellation.
+	closeSent := make(chan error, 1)
+	c.mu.Lock()
+	if c.state == RelayStateClosed {
+		err := c.closeErr
+		c.mu.Unlock()
 		return err
 	}
+	c.wg.Add(1)
+	c.mu.Unlock()
+	go func() {
+		defer c.wg.Done()
+		closeSent <- c.sendRelayEnvelope(closeEnv)
+	}()
+	select {
+	case err := <-closeSent:
+		c.closeConnection(err, true)
+	case <-c.closeCh:
+	case <-c.ctx.Done():
+	}
+	return c.closeResult()
+}
 
-	c.handleClose(nil)
-	return nil
+// Preserve the first failure instead of replacing a failed acceptance with the
+// cancellation used internally to release the other pending operations.
+func (c *RelayConnection) closeResult() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closeErr
 }
 
 // Abort 强制关闭连接，不等待确认。
@@ -501,6 +536,14 @@ func (c *RelayConnection) abort(reason error) {
 }
 
 func (c *RelayConnection) handleClose(reason error) {
+	c.closeConnection(reason, false)
+}
+
+func (c *RelayConnection) closeConnection(reason error, asyncCallbacks bool) {
+	c.closeWithSource(reason, asyncCallbacks, false)
+}
+
+func (c *RelayConnection) closeWithSource(reason error, asyncCallbacks, remoteClose bool) {
 	c.mu.Lock()
 	if c.state == RelayStateClosed {
 		c.mu.Unlock()
@@ -508,22 +551,24 @@ func (c *RelayConnection) handleClose(reason error) {
 	}
 	c.state = RelayStateClosed
 	c.closeErr = reason
+	c.remoteClosed = remoteClose
 	callbacks := make([]func(error), len(c.onClose))
 	copy(callbacks, c.onClose)
+	c.cancel()
+	close(c.closeCh)
 	c.mu.Unlock()
 
-	c.cancel()
-	select {
-	case <-c.closeCh:
-	default:
-		close(c.closeCh)
-	}
-
-	for _, fn := range callbacks {
-		fn(reason)
-	}
-
 	c.relay.removeConnection(c.relayID)
+	notify := func() {
+		for _, fn := range callbacks {
+			fn(reason)
+		}
+	}
+	if asyncCallbacks && len(callbacks) > 0 {
+		go notify()
+	} else {
+		notify()
+	}
 }
 
 func (c *RelayConnection) sendRelayEnvelope(env *RelayEnvelope) error {
@@ -558,6 +603,18 @@ func (c *RelayConnection) sendRelayEnvelope(env *RelayEnvelope) error {
 
 func (c *RelayConnection) handleEnvelope(env *RelayEnvelope) {
 	switch env.Kind {
+	case RelayKindOpenAck:
+		c.mu.Lock()
+		if c.state == RelayStateOpening {
+			c.state = RelayStateOpen
+			c.remoteSession = env.SenderSession
+			close(c.openCh)
+		}
+		c.mu.Unlock()
+	case RelayKindClose:
+		c.closeWithSource(&RelayError{Code: RelayErrorRemoteClose, Message: "remote peer closed connection"}, false, true)
+	case RelayKindError:
+		c.handleClose(&RelayError{Code: RelayErrorProtocol, Message: "remote peer error: " + string(env.Payload)})
 	case RelayKindData:
 		c.handleData(env)
 	case RelayKindAck:
@@ -584,13 +641,10 @@ func (c *RelayConnection) handleData(env *RelayEnvelope) {
 			AckSeq:        env.Seq,
 			SentAtMs:      time.Now().UnixMilli(),
 		}
-		go func() {
-			_ = c.sendRelayEnvelope(ackEnv)
-		}()
-		select {
-		case c.recvCh <- env.Payload:
-		case <-c.closeCh:
+		if !c.deliverOrdered(env.Payload) {
+			return
 		}
+		c.queueACK(ackEnv)
 
 	case ReliabilityReliableOrdered:
 		var ready [][]byte
@@ -608,10 +662,15 @@ func (c *RelayConnection) handleData(env *RelayEnvelope) {
 				}
 			}
 		} else if env.Seq > c.expectedSeq {
-			if env.Seq-c.expectedSeq < uint64(c.config.WindowSize) {
-				c.recvBuf[env.Seq] = env.Payload
+			if env.Seq-c.expectedSeq >= uint64(c.config.WindowSize) {
+				// The peer's send window is not negotiated with our reorder window.
+				// Leave this frame unacknowledged so a later retransmit can recover it.
+				c.mu.Unlock()
+				return
 			}
+			c.recvBuf[env.Seq] = env.Payload
 		}
+		c.recvReady += len(ready)
 		ackSeq := c.expectedSeq - 1
 		c.mu.Unlock()
 
@@ -619,7 +678,13 @@ func (c *RelayConnection) handleData(env *RelayEnvelope) {
 			if !c.deliverOrdered(data) {
 				return
 			}
+			c.mu.Lock()
+			c.recvReady--
+			c.mu.Unlock()
 		}
+		c.mu.Lock()
+		c.recvDelivered = ackSeq
+		c.mu.Unlock()
 		if ackSeq == 0 {
 			return
 		}
@@ -632,9 +697,7 @@ func (c *RelayConnection) handleData(env *RelayEnvelope) {
 			AckSeq:        ackSeq,
 			SentAtMs:      time.Now().UnixMilli(),
 		}
-		go func() {
-			_ = c.sendRelayEnvelope(ackEnv)
-		}()
+		c.queueACK(ackEnv)
 	}
 }
 
@@ -657,12 +720,18 @@ func (c *RelayConnection) handleAck(env *RelayEnvelope) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if env.AckSeq >= c.sendBase {
-		for seq := c.sendBase; seq <= env.AckSeq; seq++ {
-			delete(c.unacked, seq)
+	if env.AckSeq >= c.sendBase && env.AckSeq < c.nextSeq {
+		for seq := range c.unacked {
+			if seq <= env.AckSeq {
+				delete(c.unacked, seq)
+			}
 		}
 		c.sendBase = env.AckSeq + 1
 		c.retransCnt = 0
+		select {
+		case c.ackCh <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -675,13 +744,26 @@ func (c *RelayConnection) handlePing(env *RelayEnvelope) {
 		Payload:       nil,
 		SentAtMs:      time.Now().UnixMilli(),
 	}
-	go func() {
-		_ = c.sendRelayEnvelope(errEnv)
-	}()
+	_ = c.sendRelayEnvelope(errEnv)
 }
 
 func (c *RelayConnection) sendLoop() {
 	defer c.wg.Done()
+
+	c.mu.Lock()
+	c.ackCh = make(chan struct{}, 1)
+	c.mu.Unlock()
+
+	var sends sync.WaitGroup
+	defer sends.Wait()
+	limit := c.config.WindowSize
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 16 {
+		limit = 16
+	}
+	inflight := make(chan struct{}, limit)
 
 	var ackTimer *time.Timer
 	var ackTimerC <-chan time.Time
@@ -696,13 +778,40 @@ func (c *RelayConnection) sendLoop() {
 		}
 	}()
 
+	retry := func() {
+		// Retransmissions share the DATA acceptance budget, not an extra RPC.
+		select {
+		case inflight <- struct{}{}:
+		case <-c.ctx.Done():
+			return
+		}
+		defer func() { <-inflight }()
+		c.retransmit()
+		c.mu.Lock()
+		pending := len(c.unacked) > 0 && c.state != RelayStateClosed
+		c.mu.Unlock()
+		if pending && ackTimer != nil {
+			ackTimer.Reset(time.Duration(c.config.AckTimeoutMs) * time.Millisecond)
+		}
+	}
+
 	for {
 		select {
-		case data, ok := <-c.sendCh:
+		case item, ok := <-c.sendCh:
 			if !ok {
 				return
 			}
+			if item.barrier != nil {
+				sends.Wait()
+				c.mu.Lock()
+				target := c.nextSeq
+				c.mu.Unlock()
+				item.barrier <- target
+				continue
+			}
+			data := item.data
 			if data == nil {
+				sends.Wait()
 				close(c.flushCh)
 				continue
 			}
@@ -730,8 +839,9 @@ func (c *RelayConnection) sendLoop() {
 					return
 				case <-c.ctx.Done():
 					return
+				case <-c.ackCh:
 				case <-ackTimerC:
-					c.retransmit()
+					retry()
 				}
 				c.mu.Lock()
 			}
@@ -756,12 +866,31 @@ func (c *RelayConnection) sendLoop() {
 				Payload:       data,
 				SentAtMs:      time.Now().UnixMilli(),
 			}
-			if err := c.sendRelayEnvelope(env); err != nil {
-				c.handleClose(err)
+			if c.config.Reliability != ReliabilityReliableOrdered {
+				if err := c.sendRelayEnvelope(env); err != nil {
+					c.handleClose(err)
+				}
+				continue
 			}
+			// Bound outstanding acceptance RPCs separately from the Relay ACK
+			// window: an ACK may arrive before its acceptance response. Ordered
+			// delivery uses Seq, so concurrent RPC writes may safely reorder.
+			select {
+			case inflight <- struct{}{}:
+			case <-c.ctx.Done():
+				return
+			}
+			sends.Add(1)
+			go func() {
+				defer sends.Done()
+				defer func() { <-inflight }()
+				if err := c.sendRelayEnvelope(env); err != nil {
+					c.handleClose(err)
+				}
+			}()
 
 		case <-ackTimerC:
-			c.retransmit()
+			retry()
 
 		case <-c.closeCh:
 			return
@@ -774,24 +903,28 @@ func (c *RelayConnection) sendLoop() {
 
 func (c *RelayConnection) retransmit() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if len(c.unacked) == 0 {
+		c.mu.Unlock()
 		return
 	}
 
 	c.retransCnt++
 	if c.retransCnt > c.config.MaxRetransmits {
-		go c.handleClose(&RelayError{Code: RelayErrorMaxRetransmit, Message: "max retransmits exceeded"})
+		c.mu.Unlock()
+		c.handleClose(&RelayError{Code: RelayErrorMaxRetransmit, Message: "max retransmits exceeded"})
 		return
 	}
 
+	// ACK dispatch on the shared readLoop also needs mu. Never hold it while
+	// waiting for a SendPacket response from that same readLoop. Send owns
+	// payload storage, so snapshots remain valid after cumulative ACK removal.
+	frames := make([]*RelayEnvelope, 0, len(c.unacked))
 	for seq := c.sendBase; seq < c.nextSeq; seq++ {
 		frame, ok := c.unacked[seq]
 		if !ok {
 			continue
 		}
-		env := &RelayEnvelope{
+		frames = append(frames, &RelayEnvelope{
 			RelayID:       c.relayID,
 			Kind:          RelayKindData,
 			SenderSession: c.mySession,
@@ -799,8 +932,14 @@ func (c *RelayConnection) retransmit() {
 			Seq:           seq,
 			Payload:       frame.data,
 			SentAtMs:      time.Now().UnixMilli(),
+		})
+	}
+	c.mu.Unlock()
+	for _, env := range frames {
+		if err := c.sendRelayEnvelope(env); err != nil {
+			c.handleClose(err)
+			return
 		}
-		_ = c.sendRelayEnvelope(env)
 	}
 }
 

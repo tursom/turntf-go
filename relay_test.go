@@ -23,7 +23,7 @@ func newTestRelayConnection() *RelayConnection {
 		relayID:     "test-relay",
 		state:       RelayStateOpen,
 		config:      cfg,
-		sendCh:      make(chan []byte, 1),
+		sendCh:      make(chan relaySendItem, 1),
 		recvCh:      make(chan []byte, 64),
 		closeCh:     make(chan struct{}),
 		openCh:      make(chan struct{}),
@@ -50,8 +50,8 @@ func TestRelaySendOwnsQueuedData(t *testing.T) {
 
 	select {
 	case got := <-conn.sendCh:
-		if string(got) != "original" {
-			t.Fatalf("queued payload = %q, want original", got)
+		if string(got.data) != "original" {
+			t.Fatalf("queued payload = %q, want original", got.data)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for queued payload")
@@ -371,7 +371,7 @@ func TestRelayConcurrentOnCloseCallbacksRunOnce(t *testing.T) {
 
 func TestRelayConcurrentSendAndCloseKeepsCloseBarrierLast(t *testing.T) {
 	conn := newTestRelayConnection()
-	conn.sendCh = make(chan []byte, 257)
+	conn.sendCh = make(chan relaySendItem, 257)
 	const sends = 256
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -394,7 +394,7 @@ func TestRelayConcurrentSendAndCloseKeepsCloseBarrierLast(t *testing.T) {
 	seenBarrier := false
 	for len(conn.sendCh) > 0 {
 		frame := <-conn.sendCh
-		if frame == nil {
+		if frame.data == nil {
 			seenBarrier = true
 			continue
 		}
