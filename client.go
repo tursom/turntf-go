@@ -1246,6 +1246,9 @@ func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {
 		}
 		return nil, &ConnectionError{Op: "dial", Err: err}
 	}
+	// 默认 32KiB 不足以承载 32KiB Relay 数据及其协议封装。
+	// 显式设置有界的 1MiB 接收上限，与核心 WS 入站帧预算一致。
+	conn.SetReadLimit(1 << 20)
 	return conn, nil
 }
 
@@ -1421,7 +1424,15 @@ func (c *Client) writeProto(ctx context.Context, conn *websocket.Conn, msg proto
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return conn.Write(ctx, websocket.MessageBinary, payload)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// websocket 会在写 context 取消时关闭整条连接。Relay 的异步 ACK
+	// 可能与会话关闭并发；单个 RPC 的取消不能终止共享连接上的帧写入。
+	// 开始写后只受客户端生命周期和独立写超时约束，RPC 等待仍使用调用方 ctx。
+	writeCtx, cancel := context.WithTimeout(c.ctx, c.cfg.RequestTimeout)
+	defer cancel()
+	return conn.Write(writeCtx, websocket.MessageBinary, payload)
 }
 
 func (c *Client) readProto(ctx context.Context, conn *websocket.Conn) (*pb.ServerEnvelope, error) {
@@ -1483,6 +1494,10 @@ func (c *Client) rpc(ctx context.Context, build func(uint64) *pb.ClientEnvelope)
 		return requestResult{}, err
 	}
 	defer c.unregisterPending(requestID)
+	// A caller can leave while a shared frame write is still queued or in
+	// progress. Release its response slot without canceling that shared write.
+	stopCleanup := context.AfterFunc(ctx, func() { c.unregisterPending(requestID) })
+	defer stopCleanup()
 
 	if err := c.sendEnvelope(ctx, build(requestID)); err != nil {
 		return requestResult{}, err
