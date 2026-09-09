@@ -35,7 +35,7 @@ Send、Flush、Close 共用支持 context 的入队锁。Flush 的 context 覆�
 
 Close 仍从等待入队锁之前启动原有 CloseTimeout 总预算（默认 5 秒），仍等待终止 DATA 受理和接收 ACK 生成/受理屏障；没有改成活动超时。应用文件流应在其 half_close 入队后使用父 context Flush，再让 Close 承担最后的关闭阶段。应用整体取消可以 Abort，单次 Flush 超时本身不 Abort。
 
-仅当协议正常 CLOSE 是首次关闭原因时，`ReceiveTimeout`（包括 `Receive`）会先排空已经接受的缓冲 DATA，再返回原终止错误。Abort、断线和协议错误不启用该排空行为，即使 Abort 携带 remote_close 类型也不例外。原始 Receive 通道不关闭；应用必须通过接收方法处理终止状态。ACK 与 Flush 成功仍只表示 DATA 已进入远端 recvCh，不表示远端应用已经消费或持久化。
+仅当协议正常 CLOSE 是首次关闭原因时，`ReceiveTimeout`（timeout 为 0 时无限等待）会先排空已经接受的缓冲 DATA，再返回原终止错误。Abort、断线和协议错误不启用该排空行为，即使 Abort 携带 remote_close 类型也不例外。原始 Receive 通道不关闭；应用必须通过接收方法处理终止状态。ACK 与 Flush 成功仍只表示 DATA 已进入远端 recvCh，不表示远端应用已经消费或持久化。
 
 ## 验证与边界
 
