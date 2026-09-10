@@ -793,21 +793,39 @@ func (c *RelayConnection) sendLoop() {
 		}
 	}()
 
-	retry := func() {
-		// Retransmissions share the DATA acceptance budget, not an extra RPC.
-		select {
-		case inflight <- struct{}{}:
-		case <-c.ctx.Done():
-			return
-		}
-		defer func() { <-inflight }()
-		c.retransmit()
+	var retryDone <-chan struct{}
+	resetRetryTimer := func() {
 		c.mu.Lock()
 		pending := len(c.unacked) > 0 && c.state != RelayStateClosed
 		c.mu.Unlock()
 		if pending && ackTimer != nil {
 			ackTimer.Reset(time.Duration(c.config.AckTimeoutMs) * time.Millisecond)
 		}
+	}
+	retry := func() {
+		if retryDone != nil {
+			return // One retry round at a time, within the original retry budget.
+		}
+		if c.config.Reliability != ReliabilityReliableOrdered {
+			c.retransmit(inflight)
+			resetRetryTimer()
+			return
+		}
+		done := make(chan struct{})
+		retryDone = done
+		// Keep the coordinator in the acceptance barrier. Its workers share
+		// inflight with initial DATA, while this loop can act on ACK progress
+		// without waiting for every old acceptance RPC to finish.
+		sends.Add(1)
+		go func() {
+			defer sends.Done()
+			c.retransmit(inflight)
+			close(done)
+		}()
+	}
+	finishRetry := func() {
+		retryDone = nil
+		resetRetryTimer()
 	}
 
 	for {
@@ -857,6 +875,8 @@ func (c *RelayConnection) sendLoop() {
 				case <-c.ackCh:
 				case <-ackTimerC:
 					retry()
+				case <-retryDone:
+					finishRetry()
 				}
 				c.mu.Lock()
 			}
@@ -907,6 +927,9 @@ func (c *RelayConnection) sendLoop() {
 		case <-ackTimerC:
 			retry()
 
+		case <-retryDone:
+			finishRetry()
+
 		case <-c.closeCh:
 			return
 
@@ -916,7 +939,7 @@ func (c *RelayConnection) sendLoop() {
 	}
 }
 
-func (c *RelayConnection) retransmit() {
+func (c *RelayConnection) retransmit(inflight chan struct{}) {
 	c.mu.Lock()
 	if len(c.unacked) == 0 {
 		c.mu.Unlock()
@@ -950,12 +973,46 @@ func (c *RelayConnection) retransmit() {
 		})
 	}
 	c.mu.Unlock()
+	var workers sync.WaitGroup
+	defer workers.Wait()
 	for _, env := range frames {
-		if err := c.sendRelayEnvelope(env); err != nil {
-			c.handleClose(err)
+		if !c.retryStillPending(env.Seq) {
+			continue
+		}
+		select {
+		case inflight <- struct{}{}:
+		case <-c.ctx.Done():
 			return
 		}
+		// A cumulative ACK may have retired this snapshot while it waited
+		// behind other DATA RPCs. Check again after acquiring the shared slot.
+		if !c.retryStillPending(env.Seq) {
+			<-inflight
+			continue
+		}
+		send := func(env *RelayEnvelope) {
+			defer func() { <-inflight }()
+			if err := c.sendRelayEnvelope(env); err != nil {
+				c.handleClose(err)
+			}
+		}
+		if c.config.Reliability != ReliabilityReliableOrdered {
+			send(env)
+			continue
+		}
+		workers.Add(1)
+		go func(env *RelayEnvelope) {
+			defer workers.Done()
+			send(env)
+		}(env)
 	}
+}
+
+func (c *RelayConnection) retryStillPending(seq uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, pending := c.unacked[seq]
+	return pending && c.state != RelayStateClosed
 }
 
 func encodeRelayEnvelope(env *RelayEnvelope) ([]byte, error) {

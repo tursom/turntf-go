@@ -25,6 +25,8 @@
 ## Relay 临时失败与关闭
 
 - 可靠 DATA 遇到明确的 `service_unavailable` 响应时保留原序号和未确认数据，由现有 `AckTimeoutMs` / `MaxRetransmits` 重传机制恢复；`Flush` 仍须等待端到端 ACK，不把临时拒绝当成已交付。
+- ReliableOrdered DATA 的首次发送和重传共享最多 `min(WindowSize, 16)` 个 acceptance RPC 槽位。重传按原序号并发补帧，同一连接只运行一轮重传；等待槽位后会重新检查累计 ACK，跳过已确认的快照帧。ACK 释放发送窗口后，新 DATA 可以利用空闲槽位，不必等待旧重传批次全部结束。
+- 重传仍受原 `AckTimeoutMs` / `MaxRetransmits` 约束，不增加重试次数。`Flush` 与 CLOSE 的 acceptance 屏障会包含已启动的重传任务，且仍须等待端到端 ACK；并发补帧不改变接收端按序交付语义。
 - 可靠 ACK 对同一临时错误按 ACK 超时间隔进行最多 `MaxRetransmits` 次重试。重试期间保持 ACK 未完成状态，CLOSE 不得越过 ACK；取消和原 `CloseTimeoutMs` 仍可终止等待。重试耗尽保留最后的真实服务端错误。
 - `forbidden`、`not_found`、鉴权错误、断线和 best-effort 发送不会因此被重试。此策略只适用于带序号与去重的 Relay，不扩大普通 RPC 的重试范围。
 - `ReceiveTimeout` 在连接异常关闭后返回保存的关闭原因，不再用内部清理产生的 `context canceled` 覆盖它。正常远端 CLOSE 后仍先排空已接受的数据。
