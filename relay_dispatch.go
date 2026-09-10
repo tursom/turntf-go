@@ -215,7 +215,7 @@ func (c *RelayConnection) receiveACKLoop() {
 				if env == nil {
 					break
 				}
-				err := c.sendRelayEnvelope(env)
+				err := c.sendACKWithRetry(env)
 				c.mu.Lock()
 				c.ackSending = false
 				if err == nil {

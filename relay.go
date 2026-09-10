@@ -390,6 +390,7 @@ func (c *RelayConnection) ReceiveTimeout(timeout time.Duration) ([]byte, error) 
 func (c *RelayConnection) receiveTerminal(fallback error) ([]byte, error) {
 	c.mu.Lock()
 	remoteClosed := c.remoteClosed
+	cause := c.closeErr
 	c.mu.Unlock()
 	// FIFO dispatch processes remote CLOSE only after publishing its DATA
 	// prefix. No producer can add later DATA, so a nonblocking drain suffices.
@@ -401,6 +402,9 @@ func (c *RelayConnection) receiveTerminal(fallback error) ([]byte, error) {
 			}
 		default:
 		}
+	}
+	if cause != nil {
+		return nil, cause
 	}
 	return nil, fallback
 }
@@ -572,6 +576,17 @@ func (c *RelayConnection) closeWithSource(reason error, asyncCallbacks, remoteCl
 }
 
 func (c *RelayConnection) sendRelayEnvelope(env *RelayEnvelope) error {
+	err := c.sendRelayEnvelopeOnce(env)
+	// Reliable DATA stays in unacked until the peer ACKs it. A temporary
+	// rejection must use the existing bounded retransmission loop, not tear
+	// down the stream. Flush still waits for the end-to-end ACK.
+	if env.Kind == RelayKindData && c.retryableSendError(err) {
+		return nil
+	}
+	return err
+}
+
+func (c *RelayConnection) sendRelayEnvelopeOnce(env *RelayEnvelope) error {
 	if c.sendEnvelope != nil {
 		return c.sendEnvelope(env)
 	}

@@ -22,6 +22,13 @@
 - RPC 或 Relay 的调用方取消不会中断已经开始的共享 WebSocket 帧写入。写入受客户端生命周期和独立的 `RequestTimeout` 约束；`Client.Close()` 或真实写超时仍可终止连接。取得写锁后发现调用已取消时，不发送该帧。
 - `RequestTimeout` 的独立写预算从取得写锁后开始，不包含不可取消的写锁排队时间；RPC 响应等待仍使用调用方 context。取消不代表服务端操作已撤销，返回取消或超时后不能盲目重试非幂等请求。
 
+## Relay 临时失败与关闭
+
+- 可靠 DATA 遇到明确的 `service_unavailable` 响应时保留原序号和未确认数据，由现有 `AckTimeoutMs` / `MaxRetransmits` 重传机制恢复；`Flush` 仍须等待端到端 ACK，不把临时拒绝当成已交付。
+- 可靠 ACK 对同一临时错误按 ACK 超时间隔进行最多 `MaxRetransmits` 次重试。重试期间保持 ACK 未完成状态，CLOSE 不得越过 ACK；取消和原 `CloseTimeoutMs` 仍可终止等待。重试耗尽保留最后的真实服务端错误。
+- `forbidden`、`not_found`、鉴权错误、断线和 best-effort 发送不会因此被重试。此策略只适用于带序号与去重的 Relay，不扩大普通 RPC 的重试范围。
+- `ReceiveTimeout` 在连接异常关闭后返回保存的关闭原因，不再用内部清理产生的 `context canceled` 覆盖它。正常远端 CLOSE 后仍先排空已接受的数据。
+
 ## 运维接口
 
 - `GET /healthz`：公开存活检查，只返回服务进程是否可响应。
