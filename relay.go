@@ -24,10 +24,11 @@ func newRelayID() string {
 
 // Relay 管理基于 Client 的 relay 连接，负责入站连接分发和出站连接创建。
 type Relay struct {
-	client *Client
-	mu     sync.Mutex
-	conns  map[string]*RelayConnection
-	onConn func(*RelayConnection)
+	client         *Client
+	mu             sync.Mutex
+	conns          map[string]*RelayConnection
+	onConn         func(*RelayConnection)
+	incomingConfig *RelayConfig
 }
 
 // Relay 返回 Client 关联的 Relay 管理器（懒初始化）。
@@ -128,9 +129,31 @@ func (r *Relay) Connect(ctx context.Context, target UserRef, config *RelayConfig
 	}
 }
 
+// SetIncomingConfig sets the Relay configuration used for connections
+// accepted from peers. It must be called before the peer can open a Relay.
+// This is useful for bounded overlay transports whose receive budget must match
+// the sender window.
+func (r *Relay) SetIncomingConfig(config RelayConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cfg := config
+	r.incomingConfig = &cfg
+}
+
+// incomingRelayConfig returns a snapshot so accepting a connection never
+// holds the manager lock while starting the connection.
+func (r *Relay) incomingRelayConfig() RelayConfig {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.incomingConfig != nil {
+		return *r.incomingConfig
+	}
+	return DefaultRelayConfig()
+}
+
 // acceptIncoming 将入站 OPEN 帧转换为新的 RelayConnection 并通知用户处理器。
 func (r *Relay) acceptIncoming(env *RelayEnvelope, remotePeer UserRef) {
-	cfg := DefaultRelayConfig()
+	cfg := r.incomingRelayConfig()
 	conn := &RelayConnection{
 		relay:         r,
 		relayID:       env.RelayID,
@@ -775,8 +798,8 @@ func (c *RelayConnection) sendLoop() {
 	if limit < 1 {
 		limit = 1
 	}
-	if limit > 16 {
-		limit = 16
+	if limit > 64 {
+		limit = 64
 	}
 	inflight := make(chan struct{}, limit)
 

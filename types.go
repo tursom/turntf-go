@@ -372,7 +372,7 @@ type RelayConfig struct {
 	// Reliability 可靠性等级，默认 ReliabilityReliableOrdered。
 	Reliability Reliability
 	// WindowSize 发送窗口大小（在途未确认帧数上限），范围 1-256，默认 16。
-	// BestEffort 模式下忽略此配置。
+	// 实际 acceptance RPC 并发上限为 64，BestEffort 模式下忽略此配置。
 	WindowSize int
 	// OpenTimeoutMs OPEN 等待 OPEN_ACK 超时毫秒数，默认 10000。
 	OpenTimeoutMs int64

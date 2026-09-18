@@ -109,13 +109,13 @@ func TestRelayACKProgressStartsDataBeforeRetryBatchFinishes(t *testing.T) {
 }
 
 func TestRelaySkipsACKedRetriesWaitingForRPCSlot(t *testing.T) {
-	retries := make(chan uint64, 64)
+	retries := make(chan uint64, 128)
 	release := make(chan struct{})
 	next := make(chan struct{}, 1)
-	c := retryTestConnection(t, 32, func(c *RelayConnection, e *RelayEnvelope, n int) error {
-		if e.Seq == 33 {
+	c := retryTestConnection(t, 64, func(c *RelayConnection, e *RelayEnvelope, n int) error {
+		if e.Seq == 65 {
 			next <- struct{}{}
-			c.handleAck(&RelayEnvelope{AckSeq: 33})
+			c.handleAck(&RelayEnvelope{AckSeq: 65})
 			return nil
 		}
 		if n == 1 {
@@ -129,11 +129,11 @@ func TestRelaySkipsACKedRetriesWaitingForRPCSlot(t *testing.T) {
 			return c.ctx.Err()
 		}
 	})
-	queueRetryTestFrames(t, c, 33)
-	awaitRetryFrames(t, retries, 16)
+	queueRetryTestFrames(t, c, 65)
+	awaitRetryFrames(t, retries, 64)
 	// The remainder of this snapshot is waiting for an RPC slot. A cumulative
 	// ACK retires it before the slots become available, so none may be issued.
-	c.handleAck(&RelayEnvelope{AckSeq: 32})
+	c.handleAck(&RelayEnvelope{AckSeq: 64})
 	close(release)
 	select {
 	case <-next:
