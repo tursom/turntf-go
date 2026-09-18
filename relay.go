@@ -901,7 +901,7 @@ func (c *RelayConnection) sendLoop() {
 				Payload:       data,
 				SentAtMs:      time.Now().UnixMilli(),
 			}
-			if c.config.Reliability != ReliabilityReliableOrdered {
+			if c.config.Reliability == ReliabilityBestEffort {
 				if err := c.sendRelayEnvelope(env); err != nil {
 					c.handleClose(err)
 				}
@@ -909,7 +909,8 @@ func (c *RelayConnection) sendLoop() {
 			}
 			// Bound outstanding acceptance RPCs separately from the Relay ACK
 			// window: an ACK may arrive before its acceptance response. Ordered
-			// delivery uses Seq, so concurrent RPC writes may safely reorder.
+			// and at-least-once delivery both tolerate concurrent acceptance
+			// responses; only reliable-ordered delivery depends on Seq ordering.
 			select {
 			case inflight <- struct{}{}:
 			case <-c.ctx.Done():
@@ -923,6 +924,7 @@ func (c *RelayConnection) sendLoop() {
 					c.handleClose(err)
 				}
 			}()
+			continue
 
 		case <-ackTimerC:
 			retry()
