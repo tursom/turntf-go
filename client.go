@@ -33,6 +33,12 @@ type Handler interface {
 	OnDisconnect(context.Context, error)
 }
 
+// StreamHandler is an optional extension for handlers that consume stream frames.
+// Implementations that do not provide it continue to receive stream frames via OnPacket.
+type StreamHandler interface {
+	OnStream(context.Context, Packet, StreamFrame)
+}
+
 // NopHandler 是 Handler 的空实现，所有方法均为空操作。
 // 当 Config.Handler 未设置时，客户端默认使用 NopHandler。
 type NopHandler struct{}
@@ -487,6 +493,16 @@ func (c *Client) SendPacketToSession(ctx context.Context, target UserRef, target
 		DeliveryMode:  mode,
 		TargetSession: targetSession,
 	})
+}
+
+// SendStreamFrame sends one recoverable stream frame through the realtime transient path.
+// The frame remains opaque to the server and mesh, so existing clients and Relay fallback stay compatible.
+func (c *Client) SendStreamFrame(ctx context.Context, target UserRef, targetSession SessionRef, frame StreamFrame, mode DeliveryMode) (RelayAccepted, error) {
+	body, err := frame.MarshalBinary()
+	if err != nil {
+		return RelayAccepted{}, err
+	}
+	return c.SendPacketToSession(ctx, target, targetSession, body, mode)
 }
 
 // GetUser 通过 WebSocket RPC 查询指定用户的详细信息。
@@ -1322,6 +1338,16 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 		pkt := packetFromProto(body.PacketPushed.Packet)
 		if c.relay != nil && c.relay.handlePacket(pkt) {
 			return nil
+		}
+		if IsStreamFrame(pkt.Body) {
+			frame, err := UnmarshalStreamFrame(pkt.Body)
+			if err != nil {
+				return err
+			}
+			if handler, ok := c.cfg.Handler.(StreamHandler); ok {
+				handler.OnStream(c.ctx, pkt, frame)
+				return nil
+			}
 		}
 		c.cfg.Handler.OnPacket(c.ctx, pkt)
 	case *pb.ServerEnvelope_SendMessageResponse:

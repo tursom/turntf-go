@@ -69,8 +69,13 @@ func (f StreamFrame) MarshalBinary() ([]byte, error) {
 	return out, nil
 }
 
+// IsStreamFrame reports whether data starts with the stream protocol magic.
+func IsStreamFrame(data []byte) bool {
+	return len(data) >= len(streamMagic) && string(data[:len(streamMagic)]) == string(streamMagic[:])
+}
+
 func UnmarshalStreamFrame(data []byte) (StreamFrame, error) {
-	if len(data) < streamHeaderSize || string(data[:4]) != string(streamMagic[:]) {
+	if len(data) < streamHeaderSize || !IsStreamFrame(data) {
 		return StreamFrame{}, errors.New("invalid stream frame header")
 	}
 	kind := StreamFrameKind(data[4])
@@ -83,14 +88,7 @@ func UnmarshalStreamFrame(data []byte) (StreamFrame, error) {
 	}
 	var id StreamID
 	copy(id[:], data[5:21])
-	return StreamFrame{
-		Kind:    kind,
-		ID:      id,
-		Epoch:   binary.BigEndian.Uint64(data[21:29]),
-		Offset:  binary.BigEndian.Uint64(data[29:37]),
-		Window:  binary.BigEndian.Uint64(data[37:45]),
-		Payload: append([]byte(nil), data[49:]...),
-	}, nil
+	return StreamFrame{Kind: kind, ID: id, Epoch: binary.BigEndian.Uint64(data[21:29]), Offset: binary.BigEndian.Uint64(data[29:37]), Window: binary.BigEndian.Uint64(data[37:45]), Payload: append([]byte(nil), data[49:]...)}, nil
 }
 
 type StreamSenderState struct {
@@ -165,19 +163,16 @@ func (s *StreamSenderState) Resume(epoch, acknowledgedOffset uint64) ([]StreamFr
 		if start < old.Offset {
 			start = old.Offset
 		}
-		payload := append([]byte(nil), old.Payload[start-old.Offset:]...)
-		frames = append(frames, StreamFrame{Kind: StreamFrameData, ID: s.id, Epoch: epoch, Offset: start, Payload: payload})
+		frames = append(frames, StreamFrame{Kind: StreamFrameData, ID: s.id, Epoch: epoch, Offset: start, Payload: append([]byte(nil), old.Payload[start-old.Offset:]...)})
 	}
 	s.pending = append(s.pending[:0], frames...)
 	return append([]StreamFrame(nil), frames...), nil
 }
 
 type StreamReceiverState struct {
-	mu     sync.Mutex
-	id     StreamID
-	epoch  uint64
-	offset uint64
-	window uint64
+	mu                    sync.Mutex
+	id                    StreamID
+	epoch, offset, window uint64
 }
 
 func NewStreamReceiverState(id StreamID, epoch, window uint64) *StreamReceiverState {
@@ -185,6 +180,16 @@ func NewStreamReceiverState(id StreamID, epoch, window uint64) *StreamReceiverSt
 		window = DefaultStreamWindow
 	}
 	return &StreamReceiverState{id: id, epoch: epoch, window: window}
+}
+
+func (r *StreamReceiverState) Resume(epoch, offset uint64) (StreamFrame, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if epoch <= r.epoch || offset < r.offset {
+		return StreamFrame{}, errors.New("invalid stream receiver resume state")
+	}
+	r.epoch, r.offset = epoch, offset
+	return StreamFrame{Kind: StreamFrameAck, ID: r.id, Epoch: r.epoch, Offset: r.offset, Window: r.window}, nil
 }
 
 func (r *StreamReceiverState) Accept(frame StreamFrame) ([]byte, StreamFrame, error) {
@@ -208,6 +213,5 @@ func (r *StreamReceiverState) Accept(frame StreamFrame) ([]byte, StreamFrame, er
 	}
 	payload := append([]byte(nil), frame.Payload[start:]...)
 	r.offset += uint64(len(payload))
-	ack := StreamFrame{Kind: StreamFrameAck, ID: r.id, Epoch: r.epoch, Offset: r.offset, Window: r.window}
-	return payload, ack, nil
+	return payload, StreamFrame{Kind: StreamFrameAck, ID: r.id, Epoch: r.epoch, Offset: r.offset, Window: r.window}, nil
 }
