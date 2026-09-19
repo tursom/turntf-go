@@ -498,11 +498,16 @@ func (c *Client) SendPacketToSession(ctx context.Context, target UserRef, target
 // SendStreamFrame sends one recoverable stream frame through the realtime transient path.
 // The frame remains opaque to the server and mesh, so existing clients and Relay fallback stay compatible.
 func (c *Client) SendStreamFrame(ctx context.Context, target UserRef, targetSession SessionRef, frame StreamFrame, mode DeliveryMode) (RelayAccepted, error) {
-	body, err := frame.MarshalBinary()
-	if err != nil {
+	_ = mode // stream delivery has its own forwarding semantics
+	if err := target.validate(); err != nil {
 		return RelayAccepted{}, err
 	}
-	return c.SendPacketToSession(ctx, target, targetSession, body, mode)
+	if len(frame.ID) != 16 {
+		return RelayAccepted{}, errors.New("stream ID must be 16 bytes")
+	}
+	return RelayAccepted{}, c.sendEnvelope(ctx, &pb.ClientEnvelope{Body: &pb.ClientEnvelope_StreamFrame{
+		StreamFrame: &pb.StreamFrameRequest{Target: userRefToProto(target), TargetSession: sessionRefToProto(targetSession), StreamId: append([]byte(nil), frame.ID[:]...), Kind: uint32(frame.Kind), Epoch: frame.Epoch, Offset: frame.Offset, Window: frame.Window, Payload: append([]byte(nil), frame.Payload...)},
+	}})
 }
 
 // GetUser 通过 WebSocket RPC 查询指定用户的详细信息。
@@ -1334,6 +1339,21 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 			}
 		}
 		c.cfg.Handler.OnMessage(c.ctx, msg)
+	case *pb.ServerEnvelope_StreamFrame:
+		f := body.StreamFrame
+		if len(f.StreamId) != 16 {
+			return &ProtocolError{Message: "invalid stream id"}
+		}
+		var id StreamID
+		copy(id[:], f.StreamId)
+		pkt := Packet{Sender: userRefFromProto(f.Sender), Recipient: userRefFromProto(f.Recipient), TargetSession: sessionRefFromProto(f.SourceSession)}
+		frame := StreamFrame{Kind: StreamFrameKind(f.Kind), ID: id, Epoch: f.Epoch, Offset: f.Offset, Window: f.Window, Payload: append([]byte(nil), f.Payload...)}
+		if handler, ok := c.cfg.Handler.(StreamHandler); ok {
+			handler.OnStream(c.ctx, pkt, frame)
+		} else {
+			c.cfg.Handler.OnPacket(c.ctx, pkt)
+		}
+		return nil
 	case *pb.ServerEnvelope_PacketPushed:
 		pkt := packetFromProto(body.PacketPushed.Packet)
 		if c.relay != nil && c.relay.handlePacket(pkt) {

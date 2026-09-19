@@ -49,19 +49,36 @@ func TestStreamSenderWindowAndCumulativeAck(t *testing.T) {
 	}
 }
 
-func TestStreamReceiverDeduplicatesResumeOverlap(t *testing.T) {
+func TestStreamReceiverDeduplicatesOverlapAndDrainsOldEpoch(t *testing.T) {
 	id := testStreamID()
 	r := NewStreamReceiverState(id, 1, 1024)
 	payload, ack, err := r.Accept(StreamFrame{Kind: StreamFrameData, ID: id, Epoch: 1, Offset: 0, Payload: []byte("abcdef")})
 	if err != nil || string(payload) != "abcdef" || ack.Offset != 6 {
 		t.Fatalf("first accept: payload=%q ack=%+v err=%v", payload, ack, err)
 	}
-	payload, ack, err = r.Accept(StreamFrame{Kind: StreamFrameData, ID: id, Epoch: 2, Offset: 3, Payload: []byte("defghi")})
-	if err != nil || string(payload) != "ghi" || ack.Offset != 9 || ack.Epoch != 2 {
-		t.Fatalf("resume accept: payload=%q ack=%+v err=%v", payload, ack, err)
+	payload, ack, err = r.Accept(StreamFrame{Kind: StreamFrameData, ID: id, Epoch: 1, Offset: 3, Payload: []byte("defghi")})
+	if err != nil || string(payload) != "ghi" || ack.Offset != 9 {
+		t.Fatalf("overlap accept: payload=%q ack=%+v err=%v", payload, ack, err)
+	}
+	if _, err := r.Resume(2, 9); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.Accept(StreamFrame{Kind: StreamFrameData, ID: id, Epoch: 1, Offset: 9, Payload: []byte("old")}); !errors.Is(err, ErrStreamEpoch) {
+		t.Fatalf("expected old path drain, got %v", err)
+	}
+	payload, ack, err = r.Accept(StreamFrame{Kind: StreamFrameData, ID: id, Epoch: 2, Offset: 9, Payload: []byte("new")})
+	if err != nil || string(payload) != "new" || ack.Offset != 12 || ack.Epoch != 2 {
+		t.Fatalf("resumed accept: payload=%q ack=%+v err=%v", payload, ack, err)
 	}
 }
 
+func TestStreamReceiverEnforcesCredit(t *testing.T) {
+	id := testStreamID()
+	r := NewStreamReceiverState(id, 1, 4)
+	if _, _, err := r.Accept(StreamFrame{Kind: StreamFrameData, ID: id, Epoch: 1, Offset: 0, Payload: []byte("12345")}); !errors.Is(err, ErrStreamCredit) {
+		t.Fatalf("expected credit error, got %v", err)
+	}
+}
 func TestStreamSenderResumeRetransmitsUnacknowledgedSuffix(t *testing.T) {
 	id := testStreamID()
 	s := NewStreamSenderState(id, 1, 1024)

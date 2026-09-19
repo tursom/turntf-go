@@ -19,7 +19,8 @@ var streamMagic = [4]byte{'T', 'T', 'S', 1}
 var (
 	ErrStreamWindowFull = errors.New("stream send window is full")
 	ErrStreamGap        = errors.New("stream data offset has a gap")
-	ErrStreamEpoch      = errors.New("stream path epoch is stale")
+	ErrStreamEpoch      = errors.New("stream path epoch is stale or not resumed")
+	ErrStreamCredit     = errors.New("stream receive window exceeded")
 )
 
 type StreamID [16]byte
@@ -126,7 +127,7 @@ func (s *StreamSenderState) Data(payload []byte) (StreamFrame, error) {
 func (s *StreamSenderState) Acknowledge(epoch, offset, window uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if epoch < s.epoch {
+	if epoch != s.epoch {
 		return ErrStreamEpoch
 	}
 	if offset < s.acked || offset > s.next {
@@ -185,7 +186,7 @@ func NewStreamReceiverState(id StreamID, epoch, window uint64) *StreamReceiverSt
 func (r *StreamReceiverState) Resume(epoch, offset uint64) (StreamFrame, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if epoch <= r.epoch || offset < r.offset {
+	if epoch <= r.epoch || offset != r.offset {
 		return StreamFrame{}, errors.New("invalid stream receiver resume state")
 	}
 	r.epoch, r.offset = epoch, offset
@@ -198,14 +199,15 @@ func (r *StreamReceiverState) Accept(frame StreamFrame) ([]byte, StreamFrame, er
 	if frame.ID != r.id || frame.Kind != StreamFrameData {
 		return nil, StreamFrame{}, errors.New("stream frame does not belong to receiver")
 	}
-	if frame.Epoch < r.epoch {
+	if frame.Epoch != r.epoch {
 		return nil, StreamFrame{}, ErrStreamEpoch
-	}
-	if frame.Epoch > r.epoch {
-		r.epoch = frame.Epoch
 	}
 	if frame.Offset > r.offset {
 		return nil, StreamFrame{}, ErrStreamGap
+	}
+	end := frame.Offset + uint64(len(frame.Payload))
+	if end > r.offset+r.window {
+		return nil, StreamFrame{}, ErrStreamCredit
 	}
 	start := r.offset - frame.Offset
 	if start > uint64(len(frame.Payload)) {
