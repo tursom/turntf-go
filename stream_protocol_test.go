@@ -60,8 +60,12 @@ func TestStreamReceiverDeduplicatesOverlapAndDrainsOldEpoch(t *testing.T) {
 	if err != nil || string(payload) != "ghi" || ack.Offset != 9 {
 		t.Fatalf("overlap accept: payload=%q ack=%+v err=%v", payload, ack, err)
 	}
-	if _, err := r.Resume(2, 9); err != nil {
+	resumeAck, err := r.Resume(2, 6)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if resumeAck.Offset != 9 {
+		t.Fatalf("resume acknowledgement offset = %d, want 9", resumeAck.Offset)
 	}
 	if _, _, err := r.Accept(StreamFrame{Kind: StreamFrameData, ID: id, Epoch: 1, Offset: 9, Payload: []byte("old")}); !errors.Is(err, ErrStreamEpoch) {
 		t.Fatalf("expected old path drain, got %v", err)
@@ -79,6 +83,14 @@ func TestStreamReceiverEnforcesCredit(t *testing.T) {
 		t.Fatalf("expected credit error, got %v", err)
 	}
 }
+func TestStreamReceiverRejectsResumeAheadOfAcceptedOffset(t *testing.T) {
+	id := testStreamID()
+	r := NewStreamReceiverState(id, 1, 1024)
+	if _, err := r.Resume(2, 1); err == nil {
+		t.Fatal("expected resume ahead of accepted offset to fail")
+	}
+}
+
 func TestStreamSenderResumeRetransmitsUnacknowledgedSuffix(t *testing.T) {
 	id := testStreamID()
 	s := NewStreamSenderState(id, 1, 1024)

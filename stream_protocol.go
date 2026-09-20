@@ -186,10 +186,13 @@ func NewStreamReceiverState(id StreamID, epoch, window uint64) *StreamReceiverSt
 func (r *StreamReceiverState) Resume(epoch, offset uint64) (StreamFrame, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if epoch <= r.epoch || offset != r.offset {
+	if epoch <= r.epoch || offset > r.offset {
 		return StreamFrame{}, errors.New("invalid stream receiver resume state")
 	}
-	r.epoch, r.offset = epoch, offset
+	// The peer's cumulative acknowledgement may lag behind bytes already
+	// accepted here when an ACK was lost with the old path. Keep the local
+	// offset and acknowledge it so the sender can discard that pending prefix.
+	r.epoch = epoch
 	return StreamFrame{Kind: StreamFrameAck, ID: r.id, Epoch: r.epoch, Offset: r.offset, Window: r.window}, nil
 }
 

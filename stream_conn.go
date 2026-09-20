@@ -47,7 +47,9 @@ func (c StreamMuxConfig) normalized() (StreamMuxConfig, error) {
 }
 
 // StreamMux turns an asynchronous stream-frame transport into dialed and
-// accepted byte streams. HandleFrame may be called concurrently.
+// accepted byte streams. HandleFrame may be called concurrently. A mux must
+// be scoped to one authenticated remote peer; applications serving multiple
+// peers must dispatch frames to a separate mux for each peer.
 type StreamMux struct {
 	send StreamFrameSendFunc
 	cfg  StreamMuxConfig
@@ -527,6 +529,11 @@ func (c *StreamConn) handleFrame(ctx context.Context, frame StreamFrame) error {
 		c.mu.Unlock()
 		return c.sendResponseLocked(ctx, ack)
 	case StreamFrameClose:
+		epoch, _, _ := c.receiver.snapshot()
+		if frame.Epoch != epoch {
+			c.handleMu.Unlock()
+			return ErrStreamEpoch
+		}
 		c.terminate(io.EOF)
 		c.handleMu.Unlock()
 		return nil

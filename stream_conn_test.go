@@ -235,6 +235,78 @@ func TestStreamConnDeduplicatesRetransmittedData(t *testing.T) {
 	}
 }
 
+func TestStreamConnResumeRecoversAfterLostAcknowledgement(t *testing.T) {
+	var a, b *StreamMux
+	var dropAck atomic.Bool
+	dropAck.Store(true)
+	var err error
+	a, err = NewStreamMux(func(ctx context.Context, frame StreamFrame) error {
+		return b.HandleFrame(ctx, frame)
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = NewStreamMux(func(ctx context.Context, frame StreamFrame) error {
+		if frame.Kind == StreamFrameAck && frame.Offset > 0 && dropAck.CompareAndSwap(true, false) {
+			return nil
+		}
+		return a.HandleFrame(ctx, frame)
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	out, err := a.DialID(ctx, testStreamID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := b.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("ack was lost")
+	if n, err := out.Write(payload); err != nil || n != len(payload) {
+		t.Fatalf("Write = (%d, %v)", n, err)
+	}
+	if err := out.Resume(ctx); err != nil {
+		t.Fatalf("Resume after lost ACK: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(in, got); err != nil || string(got) != string(payload) {
+		t.Fatalf("Read = (%q, %v)", got, err)
+	}
+	in.mu.Lock()
+	buffered := len(in.readBuf)
+	in.mu.Unlock()
+	if buffered != 0 {
+		t.Fatalf("duplicate bytes remained buffered after resume: %d", buffered)
+	}
+}
+
+func TestStreamConnIgnoresStalePathClose(t *testing.T) {
+	pair := newStreamMuxPair(t, nil)
+	a, b := dialAndAcceptStream(t, pair)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := a.Resume(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := pair.b.HandleFrame(ctx, StreamFrame{Kind: StreamFrameClose, ID: a.ID(), Epoch: 1}); !errors.Is(err, ErrStreamEpoch) {
+		t.Fatalf("stale Close error = %v, want ErrStreamEpoch", err)
+	}
+	if _, err := a.Write([]byte("still-open")); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len("still-open"))
+	if _, err := io.ReadFull(b, got); err != nil || string(got) != "still-open" {
+		t.Fatalf("Read after stale Close = (%q, %v)", got, err)
+	}
+}
+
 func TestStreamConnRemoteCloseUnblocksRead(t *testing.T) {
 	pair := newStreamMuxPair(t, nil)
 	a, b := dialAndAcceptStream(t, pair)
