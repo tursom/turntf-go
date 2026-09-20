@@ -22,12 +22,19 @@ func newRelayID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// RelayOrphanHandler can be implemented by the Client Handler to receive
+// payload-free diagnostics without separately configuring Relay.OnOrphan.
+type RelayOrphanHandler interface {
+	OnRelayOrphan(context.Context, string, RelayKind)
+}
+
 // Relay 管理基于 Client 的 relay 连接，负责入站连接分发和出站连接创建。
 type Relay struct {
 	client         *Client
 	mu             sync.Mutex
 	conns          map[string]*RelayConnection
 	onConn         func(*RelayConnection)
+	onOrphan       func(RelayOrphan)
 	incomingConfig *RelayConfig
 }
 
@@ -46,6 +53,15 @@ func (c *Client) Relay() *Relay {
 func (r *Relay) OnConnection(handler func(*RelayConnection)) {
 	r.mu.Lock()
 	r.onConn = handler
+	r.mu.Unlock()
+}
+
+// OnOrphan registers a diagnostic handler for valid non-OPEN Relay frames
+// whose relay ID has no live connection owner. The event contains no payload,
+// credentials, peer identity, or session data.
+func (r *Relay) OnOrphan(handler func(RelayOrphan)) {
+	r.mu.Lock()
+	r.onOrphan = handler
 	r.mu.Unlock()
 }
 
@@ -151,6 +167,20 @@ func (r *Relay) incomingRelayConfig() RelayConfig {
 	return DefaultRelayConfig()
 }
 
+// sendOpenACK sends or resends the idempotent acknowledgement for an incoming
+// connection. A duplicate OPEN can therefore recover a lost OPEN_ACK without
+// replacing the connection owner.
+func (c *RelayConnection) sendOpenACK() {
+	openACK := &RelayEnvelope{
+		RelayID:       c.relayID,
+		Kind:          RelayKindOpenAck,
+		SenderSession: c.mySession,
+		TargetSession: c.remoteSession,
+		SentAtMs:      time.Now().UnixMilli(),
+	}
+	go func() { _ = c.sendRelayEnvelope(openACK) }()
+}
+
 // acceptIncoming 将入站 OPEN 帧转换为新的 RelayConnection 并通知用户处理器。
 func (r *Relay) acceptIncoming(env *RelayEnvelope, remotePeer UserRef) {
 	cfg := r.incomingRelayConfig()
@@ -177,16 +207,14 @@ func (r *Relay) acceptIncoming(env *RelayEnvelope, remotePeer UserRef) {
 	close(conn.openCh)
 
 	r.mu.Lock()
-	existing, dup := r.conns[env.RelayID]
-	if dup {
+	existing := r.conns[env.RelayID]
+	if existing != nil {
 		r.mu.Unlock()
-		if env.RelayID < existing.relayID {
-			existing.abort(&RelayError{Code: RelayErrorDuplicateOpen, Message: "concurrent OPEN, keeping lower relay_id"})
-		} else {
-			conn.abort(&RelayError{Code: RelayErrorDuplicateOpen, Message: "concurrent OPEN, keeping lower relay_id"})
-			return
+		conn.cancel()
+		if existing.remotePeer == remotePeer && existing.remoteSession == env.SenderSession && existing.mySession == env.TargetSession {
+			existing.sendOpenACK()
 		}
-		r.mu.Lock()
+		return
 	}
 	r.conns[env.RelayID] = conn
 	handler := r.onConn
@@ -194,17 +222,7 @@ func (r *Relay) acceptIncoming(env *RelayEnvelope, remotePeer UserRef) {
 
 	conn.wg.Add(1)
 	go conn.sendLoop()
-
-	openAckEnv := &RelayEnvelope{
-		RelayID:       env.RelayID,
-		Kind:          RelayKindOpenAck,
-		SenderSession: conn.mySession,
-		TargetSession: conn.remoteSession,
-		SentAtMs:      time.Now().UnixMilli(),
-	}
-	go func() {
-		_ = conn.sendRelayEnvelope(openAckEnv)
-	}()
+	conn.sendOpenACK()
 
 	if handler != nil {
 		go handler(conn)
@@ -218,20 +236,33 @@ func (r *Relay) handlePacket(p Packet) bool {
 		return false
 	}
 
+	if env.RelayID == "" || env.Kind < RelayKindOpen || env.Kind > RelayKindError {
+		return false
+	}
+
 	r.mu.Lock()
 	conn, ok := r.conns[env.RelayID]
+	orphanHandler := r.onOrphan
 	r.mu.Unlock()
 
 	switch env.Kind {
 	case RelayKindOpen:
-		if !ok {
-			r.acceptIncoming(env, p.Sender)
-		}
+		r.acceptIncoming(env, p.Sender)
 		return true
 
 	default:
 		if ok {
 			conn.enqueueEnvelope(env)
+		} else {
+			event := RelayOrphan{RelayID: env.RelayID, Kind: env.Kind}
+			if orphanHandler != nil {
+				go orphanHandler(event)
+			}
+			if r.client != nil {
+				if handler, implements := r.client.cfg.Handler.(RelayOrphanHandler); implements {
+					go handler.OnRelayOrphan(r.client.ctx, event.RelayID, event.Kind)
+				}
+			}
 		}
 		return true
 	}

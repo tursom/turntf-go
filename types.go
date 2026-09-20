@@ -367,6 +367,35 @@ const (
 	RelayKindError       RelayKind = 7
 )
 
+// String returns a stable, payload-free name suitable for Relay diagnostics.
+func (k RelayKind) String() string {
+	switch k {
+	case RelayKindOpen:
+		return "OPEN"
+	case RelayKindOpenAck:
+		return "OPEN_ACK"
+	case RelayKindData:
+		return "DATA"
+	case RelayKindAck:
+		return "ACK"
+	case RelayKindClose:
+		return "CLOSE"
+	case RelayKindPing:
+		return "PING"
+	case RelayKindError:
+		return "ERROR"
+	default:
+		return "UNSPECIFIED"
+	}
+}
+
+// RelayOrphan identifies a valid non-OPEN Relay frame with no live connection
+// owner. It intentionally excludes payload, peer identity, and session data.
+type RelayOrphan struct {
+	RelayID string
+	Kind    RelayKind
+}
+
 // RelayConfig 是 RelayConnection 的配置。
 type RelayConfig struct {
 	// Reliability 可靠性等级，默认 ReliabilityReliableOrdered。

@@ -25,7 +25,9 @@ CLOSE 的单个发送任务与调用方等待分离，结果通道有界；共�
 
 重传共享 DATA 受理额度。16 槽满时 timer 重传等待额度，部分释放后可继续；每轮重传后重新启动 ACK timer，持续丢 ACK 最终触发 MaxRetransmits。过期或未来 ACK 不推进窗口，删除仅遍历实际 unacked map。
 
-OnConnection 每入站 Relay 一次异步调用。断线批量关闭、入队溢出、主动 Close 的成功或失败、Close 总超时先关闭状态、取消及移除，再异步通知 OnClose；阻塞回调不阻塞共享 reader 或主动 Close。直接 Abort 和其他单 Relay worker 的关闭仍可能同步通知，已关闭后注册 OnClose 仍同步通知注册者。
+OnConnection 每入站 Relay 一次异步调用。重复 OPEN 不创建第二个连接，而是对来源 user/session 匹配的既有连接幂等重发 OPEN_ACK。断线批量关闭、入队溢出、主动 Close 的成功或失败、Close 总超时先关闭状态、取消及移除，再异步通知 OnClose；阻塞回调不阻塞共享 reader 或主动 Close。直接 Abort 和其他单 Relay worker 的关闭仍可能同步通知，已关闭后注册 OnClose 仍同步通知注册者。
+
+`Relay.OnOrphan` 可注册安全诊断回调；Client 的业务 Handler 也可实现可选的 `RelayOrphanHandler`。当合法 non-OPEN Relay 帧的 `relay_id` 没有 live connection owner 时，回调收到只含 `RelayID` 和 `Kind` 的 `RelayOrphan`，能力 Handler 收到等价的 `relayID` 和 `kind`；两者都不包含 payload、用户、session 或凭据。回调在 manager 锁外执行，适合由应用接入限流日志或计数器，不能用它恢复已丢失的连接状态。
 
 ## 显式 Flush 屏障
 

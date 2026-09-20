@@ -3,6 +3,7 @@ package turntf
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -14,6 +15,15 @@ import (
 
 	pb "github.com/tursom/turntf-go/internal/proto"
 )
+
+type recordingRelayOrphanHandler struct {
+	NopHandler
+	events chan RelayOrphan
+}
+
+func (h recordingRelayOrphanHandler) OnRelayOrphan(_ context.Context, relayID string, kind RelayKind) {
+	h.events <- RelayOrphan{RelayID: relayID, Kind: kind}
+}
 
 func newTestRelayConnection() *RelayConnection {
 	cfg := DefaultRelayConfig()
@@ -70,6 +80,198 @@ func TestRelayStaleCloseDoesNotRemoveReplacement(t *testing.T) {
 		t.Fatalf("replacement payload = %q, want packet", packet)
 	}
 	replacement.Abort(errors.New("test complete"))
+}
+
+func TestRelayDuplicateOpenResendsAckWithoutReplacingOwner(t *testing.T) {
+	relay := &Relay{conns: make(map[string]*RelayConnection)}
+	existing := newTestRelayConnection()
+	existing.relay = relay
+	existing.relayID = "duplicate-open"
+	existing.remotePeer = UserRef{NodeID: 2, UserID: 3}
+	existing.remoteSession = SessionRef{ServingNodeID: 2, SessionID: "remote"}
+	existing.mySession = SessionRef{ServingNodeID: 1, SessionID: "local"}
+	acks := make(chan *RelayEnvelope, 1)
+	existing.sendEnvelope = func(env *RelayEnvelope) error {
+		acks <- env
+		return nil
+	}
+	relay.conns[existing.relayID] = existing
+	var accepted atomic.Int32
+	relay.OnConnection(func(*RelayConnection) { accepted.Add(1) })
+
+	const duplicates = 5
+	var opens sync.WaitGroup
+	for range duplicates {
+		opens.Add(1)
+		go func() {
+			defer opens.Done()
+			relay.acceptIncoming(&RelayEnvelope{
+				RelayID:       existing.relayID,
+				Kind:          RelayKindOpen,
+				SenderSession: existing.remoteSession,
+				TargetSession: existing.mySession,
+			}, existing.remotePeer)
+		}()
+	}
+	opens.Wait()
+
+	for range duplicates {
+		select {
+		case ack := <-acks:
+			if ack.Kind != RelayKindOpenAck || ack.RelayID != existing.relayID {
+				t.Fatalf("duplicate OPEN response = %+v", ack)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("duplicate OPEN did not resend OPEN_ACK")
+		}
+	}
+	relay.mu.Lock()
+	owner := relay.conns[existing.relayID]
+	relay.mu.Unlock()
+	if owner != existing || accepted.Load() != 0 {
+		t.Fatalf("duplicate OPEN replaced owner=%p or accepted=%d", owner, accepted.Load())
+	}
+	existing.Abort(errors.New("test complete"))
+}
+
+func TestRelayReportsPayloadFreeOrphan(t *testing.T) {
+	capabilityEvents := make(chan RelayOrphan, 1)
+	client := &Client{cfg: Config{Handler: recordingRelayOrphanHandler{events: capabilityEvents}}, ctx: context.Background()}
+	relay := &Relay{client: client, conns: make(map[string]*RelayConnection)}
+	events := make(chan RelayOrphan, 1)
+	relay.OnOrphan(func(event RelayOrphan) { events <- event })
+	body, err := encodeRelayEnvelope(&RelayEnvelope{
+		RelayID: "missing-relay",
+		Kind:    RelayKindData,
+		Payload: []byte("must-not-be-observable"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !relay.handlePacket(Packet{Body: body}) {
+		t.Fatal("valid orphan Relay frame was not recognized")
+	}
+	select {
+	case event := <-events:
+		if event != (RelayOrphan{RelayID: "missing-relay", Kind: RelayKindData}) {
+			t.Fatalf("orphan event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("orphan event was not reported")
+	}
+	select {
+	case event := <-capabilityEvents:
+		if event != (RelayOrphan{RelayID: "missing-relay", Kind: RelayKindData}) {
+			t.Fatalf("handler orphan event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RelayOrphanHandler was not notified")
+	}
+}
+
+func TestRelayFiveClientSameUserSessionsDataAndAck(t *testing.T) {
+	hubRelay := &Relay{conns: make(map[string]*RelayConnection)}
+	sameUser := UserRef{NodeID: 2, UserID: 7}
+	var orphanCount atomic.Int32
+	hubRelay.OnOrphan(func(RelayOrphan) { orphanCount.Add(1) })
+
+	type pair struct {
+		client *RelayConnection
+		hub    *RelayConnection
+	}
+	pairs := make([]pair, 5)
+	for i := range pairs {
+		id := fmt.Sprintf("relay-%d", i)
+		clientRelay := &Relay{conns: make(map[string]*RelayConnection)}
+		clientRelay.OnOrphan(func(RelayOrphan) { orphanCount.Add(1) })
+		client := newTestRelayConnection()
+		hub := newTestRelayConnection()
+		client.relay, client.relayID = clientRelay, id
+		hub.relay, hub.relayID = hubRelay, id
+		client.remotePeer = UserRef{NodeID: 1, UserID: 1}
+		hub.remotePeer = sameUser
+		client.mySession = SessionRef{ServingNodeID: 2, SessionID: fmt.Sprintf("client-%d", i)}
+		client.remoteSession = SessionRef{ServingNodeID: 1, SessionID: "hub"}
+		hub.mySession, hub.remoteSession = client.remoteSession, client.mySession
+		client.config.Reliability = ReliabilityAtLeastOnce
+		hub.config.Reliability = ReliabilityAtLeastOnce
+		client.sendBase, client.nextSeq = 1, 1
+		hub.sendBase, hub.nextSeq = 1, 1
+		clientRelay.conns[id] = client
+		hubRelay.conns[id] = hub
+		client.sendEnvelope = func(env *RelayEnvelope) error {
+			body, encodeErr := encodeRelayEnvelope(env)
+			if encodeErr == nil {
+				hubRelay.handlePacket(Packet{Sender: sameUser, Body: body})
+			}
+			return encodeErr
+		}
+		hub.sendEnvelope = func(env *RelayEnvelope) error {
+			body, encodeErr := encodeRelayEnvelope(env)
+			if encodeErr == nil {
+				clientRelay.handlePacket(Packet{Sender: client.remotePeer, Body: body})
+			}
+			return encodeErr
+		}
+		client.wg.Add(1)
+		hub.wg.Add(1)
+		go client.sendLoop()
+		go hub.sendLoop()
+		pairs[i] = pair{client: client, hub: hub}
+	}
+
+	var sends sync.WaitGroup
+	for i := range pairs {
+		sends.Add(1)
+		go func(i int) {
+			defer sends.Done()
+			if err := pairs[i].client.Send([]byte(fmt.Sprintf("request-%d", i))); err != nil {
+				t.Errorf("client %d Send: %v", i, err)
+			}
+		}(i)
+	}
+	sends.Wait()
+	for i := range pairs {
+		got, err := pairs[i].hub.ReceiveTimeout(time.Second)
+		if err != nil || string(got) != fmt.Sprintf("request-%d", i) {
+			t.Fatalf("hub receive %d = %q, %v", i, got, err)
+		}
+		if err := pairs[i].hub.Send([]byte(fmt.Sprintf("response-%d", i))); err != nil {
+			t.Fatalf("hub Send %d: %v", i, err)
+		}
+		got, err = pairs[i].client.ReceiveTimeout(time.Second)
+		if err != nil || string(got) != fmt.Sprintf("response-%d", i) {
+			t.Fatalf("client receive %d = %q, %v", i, got, err)
+		}
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		pending := 0
+		for i := range pairs {
+			pairs[i].client.mu.Lock()
+			pending += len(pairs[i].client.unacked)
+			pairs[i].client.mu.Unlock()
+			pairs[i].hub.mu.Lock()
+			pending += len(pairs[i].hub.unacked)
+			pairs[i].hub.mu.Unlock()
+		}
+		if pending == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("DATA/ACK did not drain, pending=%d", pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := orphanCount.Load(); got != 0 {
+		t.Fatalf("five-client exchange produced %d orphan frames", got)
+	}
+	for i := range pairs {
+		pairs[i].client.Abort(errors.New("test complete"))
+		pairs[i].hub.Abort(errors.New("test complete"))
+		pairs[i].client.wg.Wait()
+		pairs[i].hub.wg.Wait()
+	}
 }
 
 func TestRelaySendOwnsQueuedData(t *testing.T) {
