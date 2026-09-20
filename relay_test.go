@@ -38,6 +38,40 @@ func newTestRelayConnection() *RelayConnection {
 	return conn
 }
 
+func TestRelayStaleCloseDoesNotRemoveReplacement(t *testing.T) {
+	stale := newTestRelayConnection()
+	relay := stale.relay
+	replacement := newTestRelayConnection()
+	replacement.relay = relay
+	replacement.relayID = stale.relayID
+	replacement.config.Reliability = ReliabilityBestEffort
+	relay.conns[stale.relayID] = replacement
+
+	stale.Abort(errors.New("replaced"))
+
+	relay.mu.Lock()
+	got := relay.conns[stale.relayID]
+	relay.mu.Unlock()
+	if got != replacement {
+		t.Fatalf("connection mapping = %p, want replacement %p", got, replacement)
+	}
+	body, err := encodeRelayEnvelope(&RelayEnvelope{RelayID: replacement.relayID, Kind: RelayKindData, Seq: 1, Payload: []byte("packet")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !relay.handlePacket(Packet{Body: body}) {
+		t.Fatal("replacement DATA was not recognized as Relay traffic")
+	}
+	packet, err := replacement.ReceiveTimeout(time.Second)
+	if err != nil {
+		t.Fatalf("replacement ReceiveTimeout: %v", err)
+	}
+	if string(packet) != "packet" {
+		t.Fatalf("replacement payload = %q, want packet", packet)
+	}
+	replacement.Abort(errors.New("test complete"))
+}
+
 func TestRelaySendOwnsQueuedData(t *testing.T) {
 	conn := newTestRelayConnection()
 	defer conn.Abort(errors.New("test complete"))
@@ -65,6 +99,8 @@ func TestRelayOutgoingReliableOrderedStartsAtSequenceOne(t *testing.T) {
 	remoteSession := SessionRef{ServingNodeID: 8192, SessionID: "remote-session"}
 	dataSequence := make(chan uint64, 1)
 	remoteAckSent := make(chan struct{})
+	serverRelease := make(chan struct{})
+	var releaseOnce sync.Once
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -160,6 +196,7 @@ func TestRelayOutgoingReliableOrderedStartsAtSequenceOne(t *testing.T) {
 		}
 		writeTransientAccepted(t, conn, closeRequest, remote, remoteSession)
 		<-remoteAckSent
+		<-serverRelease
 	}))
 	defer server.Close()
 
@@ -174,6 +211,7 @@ func TestRelayOutgoingReliableOrderedStartsAtSequenceOne(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	defer client.Close()
+	defer releaseOnce.Do(func() { close(serverRelease) })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := client.Connect(ctx); err != nil {
@@ -206,6 +244,7 @@ func TestRelayOutgoingReliableOrderedStartsAtSequenceOne(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Relay.Close: %v", err)
 		}
+		releaseOnce.Do(func() { close(serverRelease) })
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for Relay.Close")
 	}

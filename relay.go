@@ -237,10 +237,13 @@ func (r *Relay) handlePacket(p Packet) bool {
 	}
 }
 
-// removeConnection 从管理器中移除连接。
-func (r *Relay) removeConnection(relayID string) {
+// removeConnection removes conn only while it still owns the relay ID. A
+// delayed close from a replaced connection must not evict its successor.
+func (r *Relay) removeConnection(relayID string, conn *RelayConnection) {
 	r.mu.Lock()
-	delete(r.conns, relayID)
+	if r.conns[relayID] == conn {
+		delete(r.conns, relayID)
+	}
 	r.mu.Unlock()
 }
 
@@ -585,7 +588,7 @@ func (c *RelayConnection) closeWithSource(reason error, asyncCallbacks, remoteCl
 	close(c.closeCh)
 	c.mu.Unlock()
 
-	c.relay.removeConnection(c.relayID)
+	c.relay.removeConnection(c.relayID, c)
 	notify := func() {
 		for _, fn := range callbacks {
 			fn(reason)
