@@ -407,7 +407,7 @@ func (c *Client) Close() error {
 // Ping 发送 WebSocket ping 请求给服务端，用于检测连接活性。
 // 返回服务端的响应错误（如果有）。
 func (c *Client) Ping(ctx context.Context) error {
-	res, err := c.rpc(ctx, func(requestID uint64) *pb.ClientEnvelope {
+	res, conn, err := c.rpcOnTransport(ctx, func(requestID uint64) *pb.ClientEnvelope {
 		return &pb.ClientEnvelope{
 			Body: &pb.ClientEnvelope_Ping{
 				Ping: &pb.Ping{RequestId: requestID},
@@ -415,6 +415,7 @@ func (c *Client) Ping(ctx context.Context) error {
 		}
 	})
 	if err != nil {
+		c.invalidatePingTransport(conn, err)
 		return err
 	}
 	return res.err
@@ -1524,18 +1525,23 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 }
 
 func (c *Client) sendEnvelope(ctx context.Context, env *pb.ClientEnvelope) error {
+	_, err := c.sendEnvelopeOnTransport(ctx, env)
+	return err
+}
+
+func (c *Client) sendEnvelopeOnTransport(ctx context.Context, env *pb.ClientEnvelope) (*websocket.Conn, error) {
 	c.stateMu.RLock()
 	conn := c.conn
 	closed := c.closed
 	c.stateMu.RUnlock()
 
 	if closed {
-		return ErrClosed
+		return nil, ErrClosed
 	}
 	if conn == nil {
-		return ErrNotConnected
+		return nil, ErrNotConnected
 	}
-	return c.writeProto(ctx, conn, env)
+	return conn, c.writeProto(ctx, conn, env)
 }
 
 func (c *Client) writeProto(ctx context.Context, conn *websocket.Conn, msg proto.Message) error {
@@ -1574,6 +1580,19 @@ func (c *Client) invalidateTransport(conn *websocket.Conn) {
 	c.stateMu.Unlock()
 
 	conn.CloseNow()
+}
+
+func (c *Client) invalidatePingTransport(conn *websocket.Conn, err error) {
+	if conn == nil || err == nil {
+		return
+	}
+	var serverErr *ServerError
+	// A correlated server error proves the read path is alive; it is an RPC
+	// result, not evidence that the transport generation is unusable.
+	if errors.As(err, &serverErr) || errors.Is(err, ErrClosed) || errors.Is(err, ErrNotConnected) || errors.Is(err, context.Canceled) {
+		return
+	}
+	c.invalidateTransport(conn)
 }
 
 func (c *Client) readProto(ctx context.Context, conn *websocket.Conn) (*pb.ServerEnvelope, error) {
@@ -1629,10 +1648,15 @@ func (c *Client) registerPending(requestID uint64) (chan requestResult, error) {
 }
 
 func (c *Client) rpc(ctx context.Context, build func(uint64) *pb.ClientEnvelope) (requestResult, error) {
+	res, _, err := c.rpcOnTransport(ctx, build)
+	return res, err
+}
+
+func (c *Client) rpcOnTransport(ctx context.Context, build func(uint64) *pb.ClientEnvelope) (requestResult, *websocket.Conn, error) {
 	requestID := c.nextRequestID()
 	resultCh, err := c.registerPending(requestID)
 	if err != nil {
-		return requestResult{}, err
+		return requestResult{}, nil, err
 	}
 	defer c.unregisterPending(requestID)
 	// A caller can leave while a shared frame write is still queued or in
@@ -1640,10 +1664,12 @@ func (c *Client) rpc(ctx context.Context, build func(uint64) *pb.ClientEnvelope)
 	stopCleanup := context.AfterFunc(ctx, func() { c.unregisterPending(requestID) })
 	defer stopCleanup()
 
-	if err := c.sendEnvelope(ctx, build(requestID)); err != nil {
-		return requestResult{}, err
+	conn, err := c.sendEnvelopeOnTransport(ctx, build(requestID))
+	if err != nil {
+		return requestResult{}, conn, err
 	}
-	return waitRequest(ctx, resultCh)
+	res, err := waitRequest(ctx, resultCh)
+	return res, conn, err
 }
 
 func (c *Client) unregisterPending(requestID uint64) {

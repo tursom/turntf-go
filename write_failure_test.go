@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 	pb "github.com/tursom/turntf-go/internal/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 type failNextWriteConn struct {
@@ -212,5 +213,235 @@ func TestInvalidateTransportIgnoresStaleConnection(t *testing.T) {
 
 	if client.conn != current || !client.authenticated || client.loginInfo.User.Username != "current" {
 		t.Fatalf("stale failure invalidated current transport: conn=%p authenticated=%v login=%+v", client.conn, client.authenticated, client.loginInfo)
+	}
+}
+
+func TestPingTimeoutClosesHalfOpenTransportAndReconnects(t *testing.T) {
+	var attempts atomic.Int32
+	firstRequestsRead := make(chan struct{})
+	firstConnectionClosed := make(chan struct{})
+	secondLogin := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+
+		attempt := attempts.Add(1)
+		_ = mustReadClientEnvelope(t, conn).GetLogin()
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{Body: &pb.ServerEnvelope_LoginResponse{
+			LoginResponse: &pb.LoginResponse{
+				User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
+				ProtocolVersion: clientProtocolVersion,
+			},
+		}})
+
+		if attempt == 1 {
+			var gotGetUser, gotStream, gotPing bool
+			for !gotGetUser || !gotStream || !gotPing {
+				env := mustReadClientEnvelope(t, conn)
+				gotGetUser = gotGetUser || env.GetGetUser() != nil
+				gotStream = gotStream || env.GetStreamFrame() != nil
+				gotPing = gotPing || env.GetPing() != nil
+			}
+			close(firstRequestsRead)
+			_, _, _ = conn.Read(context.Background())
+			close(firstConnectionClosed)
+			return
+		}
+
+		close(secondLogin)
+		for {
+			_, payload, err := conn.Read(context.Background())
+			if err != nil {
+				return
+			}
+			var env pb.ClientEnvelope
+			if proto.Unmarshal(payload, &env) != nil || env.GetPing() == nil {
+				continue
+			}
+			response, err := proto.Marshal(&pb.ServerEnvelope{Body: &pb.ServerEnvelope_Pong{
+				Pong: &pb.Pong{RequestId: env.GetPing().RequestId},
+			}})
+			if err != nil {
+				return
+			}
+			if conn.Write(context.Background(), websocket.MessageBinary, response) != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	handler := &writeFailureHandler{
+		disconnects: make(chan error, 2),
+		streamSends: make(chan StreamSendResult, 2),
+	}
+	client, err := NewClient(Config{
+		BaseURL:               server.URL,
+		Credentials:           Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
+		Handler:               handler,
+		Reconnect:             true,
+		InitialReconnectDelay: 10 * time.Millisecond,
+		MaxReconnectDelay:     20 * time.Millisecond,
+		PingInterval:          100 * time.Millisecond,
+		RequestTimeout:        80 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	getUserDone := make(chan error, 1)
+	go func() {
+		_, err := client.GetUser(ctx, UserRef{NodeID: 4096, UserID: 1025})
+		getUserDone <- err
+	}()
+	requestID, err := client.SendStreamFrameTracked(ctx, UserRef{NodeID: 4096, UserID: 2049}, SessionRef{}, StreamFrame{
+		Kind: StreamFrameData,
+		ID:   testStreamID(),
+	}, DeliveryModeBestEffort)
+	if err != nil {
+		t.Fatalf("SendStreamFrameTracked: %v", err)
+	}
+
+	select {
+	case <-firstRequestsRead:
+	case <-ctx.Done():
+		t.Fatal("server did not read pending requests and heartbeat Ping")
+	}
+	select {
+	case <-firstConnectionClosed:
+	case <-ctx.Done():
+		t.Fatal("Ping timeout did not close the half-open transport")
+	}
+	select {
+	case err := <-getUserDone:
+		if !errors.Is(err, ErrDisconnected) {
+			t.Fatalf("pending RPC error = %v, want ErrDisconnected", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("pending RPC was not released")
+	}
+	select {
+	case result := <-handler.streamSends:
+		if result.RequestID != requestID || !errors.Is(result.Err, ErrDisconnected) {
+			t.Fatalf("tracked stream result = %+v, want request %d disconnected", result, requestID)
+		}
+	case <-ctx.Done():
+		t.Fatal("tracked stream was not released")
+	}
+	select {
+	case <-handler.streamSends:
+		t.Fatal("tracked stream callback ran more than once")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-handler.disconnects:
+	case <-ctx.Done():
+		t.Fatal("disconnect callback was not invoked")
+	}
+	select {
+	case <-handler.disconnects:
+		t.Fatal("disconnect callback ran more than once for one transport")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-secondLogin:
+	case <-ctx.Done():
+		t.Fatal("client did not reauthenticate after Ping timeout")
+	}
+
+	client.pendingMu.Lock()
+	pending := len(client.pending)
+	client.pendingMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("old pending RPCs leaked after reconnect: %d", pending)
+	}
+	if _, ok := client.CurrentLogin(); !ok {
+		t.Fatal("reconnected client is not authenticated")
+	}
+}
+
+func TestPingFailureDoesNotInvalidateNewTransportGeneration(t *testing.T) {
+	current := new(websocket.Conn)
+	stale := new(websocket.Conn)
+	client := &Client{
+		conn:          current,
+		authenticated: true,
+		loginInfo:     LoginInfo{User: User{Username: "current"}},
+	}
+
+	client.invalidatePingTransport(stale, context.DeadlineExceeded)
+
+	if client.conn != current || !client.authenticated || client.loginInfo.User.Username != "current" {
+		t.Fatalf("stale Ping invalidated current transport: conn=%p authenticated=%v login=%+v", client.conn, client.authenticated, client.loginInfo)
+	}
+}
+
+func TestPingServerErrorKeepsTransport(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+
+		_ = mustReadClientEnvelope(t, conn).GetLogin()
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{Body: &pb.ServerEnvelope_LoginResponse{
+			LoginResponse: &pb.LoginResponse{
+				User:            &pb.User{NodeId: 4096, UserId: 1025, Username: "alice", Role: "user"},
+				ProtocolVersion: clientProtocolVersion,
+			},
+		}})
+		first := mustReadClientEnvelope(t, conn).GetPing()
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{Body: &pb.ServerEnvelope_Error{
+			Error: &pb.Error{RequestId: first.RequestId, Code: "rate_limited", Message: "try later"},
+		}})
+		second := mustReadClientEnvelope(t, conn).GetPing()
+		writeServerEnvelope(t, conn, &pb.ServerEnvelope{Body: &pb.ServerEnvelope_Pong{
+			Pong: &pb.Pong{RequestId: second.RequestId},
+		}})
+		_, _, _ = conn.Read(context.Background())
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL:        server.URL,
+		Credentials:    Credentials{NodeID: 4096, UserID: 1025, Password: MustPlainPassword("alice-password")},
+		PingInterval:   time.Hour,
+		RequestTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	var serverErr *ServerError
+	if err := client.Ping(ctx); !errors.As(err, &serverErr) || serverErr.Code != "rate_limited" {
+		t.Fatalf("first Ping error = %v, want rate_limited ServerError", err)
+	}
+	if err := client.Ping(ctx); err != nil {
+		t.Fatalf("second Ping on same transport: %v", err)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("websocket attempts = %d, want 1", got)
 	}
 }
