@@ -1553,7 +1553,27 @@ func (c *Client) writeProto(ctx context.Context, conn *websocket.Conn, msg proto
 	// 开始写后只受客户端生命周期和独立写超时约束，RPC 等待仍使用调用方 ctx。
 	writeCtx, cancel := context.WithTimeout(c.ctx, c.cfg.RequestTimeout)
 	defer cancel()
-	return conn.Write(writeCtx, websocket.MessageBinary, payload)
+	if err := conn.Write(writeCtx, websocket.MessageBinary, payload); err != nil {
+		c.invalidateTransport(conn)
+		return err
+	}
+	return nil
+}
+
+// invalidateTransport only tears down the connection generation that failed.
+// Closing it wakes the serve loop when its read side has not observed the loss.
+func (c *Client) invalidateTransport(conn *websocket.Conn) {
+	c.stateMu.Lock()
+	if c.conn != conn {
+		c.stateMu.Unlock()
+		return
+	}
+	c.conn = nil
+	c.authenticated = false
+	c.loginInfo = LoginInfo{}
+	c.stateMu.Unlock()
+
+	conn.CloseNow()
 }
 
 func (c *Client) readProto(ctx context.Context, conn *websocket.Conn) (*pb.ServerEnvelope, error) {
