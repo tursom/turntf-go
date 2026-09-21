@@ -17,7 +17,10 @@ import (
 	pb "github.com/tursom/turntf-go/internal/proto"
 )
 
-const clientProtocolVersion = "client-v1alpha5"
+const (
+	clientProtocolVersion         = "client-v1alpha5"
+	DefaultStreamSendPendingLimit = 1024
+)
 
 // Logger 是日志记录器接口，用于输出客户端内部日志（如重连、错误信息）。
 type Logger interface {
@@ -37,6 +40,11 @@ type Handler interface {
 // Implementations that do not provide it continue to receive stream frames via OnPacket.
 type StreamHandler interface {
 	OnStream(context.Context, Packet, StreamFrame)
+}
+
+// StreamSendHandler is an optional extension for asynchronous tracked stream send results.
+type StreamSendHandler interface {
+	OnStreamSendResult(context.Context, StreamSendResult)
 }
 
 // NopHandler 是 Handler 的空实现，所有方法均为空操作。
@@ -89,6 +97,8 @@ type Config struct {
 	TransientOnly bool
 	// RealtimeStream 是否使用实时流通道（/ws/realtime），默认为 false（使用 /ws/client）。
 	RealtimeStream bool
+	// StreamSendPendingLimit limits tracked sends awaiting a server result. Defaults to 1024.
+	StreamSendPendingLimit int
 }
 
 // Client 是 WebSocket 客户端，管理与服务端的长连接、消息收发、自动重连和 RPC 请求。
@@ -119,6 +129,9 @@ type Client struct {
 
 	pendingMu sync.Mutex
 	pending   map[uint64]chan requestResult
+
+	streamSendMu      sync.Mutex
+	streamSendPending map[uint64]StreamSendMetadata
 
 	requestID atomic.Uint64
 
@@ -159,6 +172,9 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.PingInterval <= 0 {
 		cfg.PingInterval = 30 * time.Second
 	}
+	if cfg.StreamSendPendingLimit <= 0 {
+		cfg.StreamSendPendingLimit = DefaultStreamSendPendingLimit
+	}
 	if !cfg.Reconnect {
 		cfg.Reconnect = true
 	}
@@ -168,13 +184,14 @@ func NewClient(cfg Config) (*Client, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
-		cfg:          cfg,
-		http:         &HTTPClient{BaseURL: strings.TrimRight(cfg.BaseURL, "/"), HTTPClient: cfg.HTTPClient},
-		ctx:          ctx,
-		cancel:       cancel,
-		done:         make(chan struct{}),
-		firstConnect: make(chan error, 1),
-		pending:      make(map[uint64]chan requestResult),
+		cfg:               cfg,
+		http:              &HTTPClient{BaseURL: strings.TrimRight(cfg.BaseURL, "/"), HTTPClient: cfg.HTTPClient},
+		ctx:               ctx,
+		cancel:            cancel,
+		done:              make(chan struct{}),
+		firstConnect:      make(chan error, 1),
+		pending:           make(map[uint64]chan requestResult),
+		streamSendPending: make(map[uint64]StreamSendMetadata),
 	}, nil
 }
 
@@ -376,6 +393,7 @@ func (c *Client) Close() error {
 	c.stateMu.Unlock()
 
 	c.cancel()
+	c.failAllStreamSends(ErrClosed)
 	c.Relay().closeAll(ErrClosed)
 	if conn != nil {
 		conn.Close(websocket.StatusNormalClosure, "client closed")
@@ -506,8 +524,60 @@ func (c *Client) SendStreamFrame(ctx context.Context, target UserRef, targetSess
 		return RelayAccepted{}, errors.New("stream ID must be 16 bytes")
 	}
 	return RelayAccepted{}, c.sendEnvelope(ctx, &pb.ClientEnvelope{Body: &pb.ClientEnvelope_StreamFrame{
-		StreamFrame: &pb.StreamFrameRequest{Target: userRefToProto(target), TargetSession: sessionRefToProto(targetSession), StreamId: append([]byte(nil), frame.ID[:]...), Kind: uint32(frame.Kind), Epoch: frame.Epoch, Offset: frame.Offset, Window: frame.Window, Payload: append([]byte(nil), frame.Payload...)},
+		StreamFrame: streamFrameRequest(0, target, targetSession, frame),
 	}})
+}
+
+// SendStreamFrameTracked writes one stream frame and returns without waiting for its server result.
+// Completion is delivered to StreamSendHandler. A successful return means the frame was written and tracked.
+func (c *Client) SendStreamFrameTracked(ctx context.Context, target UserRef, targetSession SessionRef, frame StreamFrame, mode DeliveryMode) (uint64, error) {
+	_ = mode // stream delivery has its own forwarding semantics
+	if err := target.validate(); err != nil {
+		return 0, err
+	}
+	if !targetSession.IsZero() {
+		if err := targetSession.validate(); err != nil {
+			return 0, fmt.Errorf("invalid target_session: %w", err)
+		}
+	}
+	if frame.Kind < StreamFrameOpen || frame.Kind > StreamFrameClose {
+		return 0, fmt.Errorf("invalid stream frame kind %d", frame.Kind)
+	}
+	if len(frame.Payload) > DefaultStreamMaxFrame {
+		return 0, fmt.Errorf("stream payload exceeds %d bytes", DefaultStreamMaxFrame)
+	}
+
+	requestID := c.nextRequestID()
+	metadata := StreamSendMetadata{
+		Target:        target,
+		TargetSession: targetSession,
+		StreamID:      frame.ID,
+		Kind:          frame.Kind,
+	}
+	if err := c.registerStreamSend(requestID, metadata); err != nil {
+		return 0, err
+	}
+	if err := c.sendEnvelope(ctx, &pb.ClientEnvelope{Body: &pb.ClientEnvelope_StreamFrame{
+		StreamFrame: streamFrameRequest(requestID, target, targetSession, frame),
+	}}); err != nil {
+		c.takeStreamSend(requestID)
+		return 0, err
+	}
+	return requestID, nil
+}
+
+func streamFrameRequest(requestID uint64, target UserRef, targetSession SessionRef, frame StreamFrame) *pb.StreamFrameRequest {
+	return &pb.StreamFrameRequest{
+		RequestId:     requestID,
+		Target:        userRefToProto(target),
+		TargetSession: sessionRefToProto(targetSession),
+		StreamId:      append([]byte(nil), frame.ID[:]...),
+		Kind:          uint32(frame.Kind),
+		Epoch:         frame.Epoch,
+		Offset:        frame.Offset,
+		Window:        frame.Window,
+		Payload:       append([]byte(nil), frame.Payload...),
+	}
 }
 
 // GetUser 通过 WebSocket RPC 查询指定用户的详细信息。
@@ -1247,6 +1317,7 @@ func (c *Client) connectAndServe() error {
 	c.stateMu.Unlock()
 
 	c.failAllPending(ErrDisconnected)
+	c.failAllStreamSends(ErrDisconnected)
 	c.Relay().closeAll(ErrDisconnected)
 	c.cfg.Handler.OnDisconnect(c.ctx, readErr)
 	_ = conn.Close(websocket.StatusNormalClosure, "disconnect")
@@ -1354,6 +1425,8 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 			c.cfg.Handler.OnPacket(c.ctx, pkt)
 		}
 		return nil
+	case *pb.ServerEnvelope_StreamFrameResult:
+		c.completeStreamSend(body.StreamFrameResult.RequestId, nil)
 	case *pb.ServerEnvelope_PacketPushed:
 		pkt := packetFromProto(body.PacketPushed.Packet)
 		if c.relay != nil && c.relay.handlePacket(pkt) {
@@ -1436,7 +1509,9 @@ func (c *Client) handleServerEnvelope(env *pb.ServerEnvelope) error {
 			RequestID: body.Error.RequestId,
 		}
 		if body.Error.RequestId != 0 {
-			c.resolvePending(body.Error.RequestId, requestResult{err: serverErr})
+			if !c.resolvePending(body.Error.RequestId, requestResult{err: serverErr}) {
+				c.completeStreamSend(body.Error.RequestId, serverErr)
+			}
 		} else {
 			return serverErr
 		}
@@ -1557,17 +1632,18 @@ func (c *Client) unregisterPending(requestID uint64) {
 	c.pendingMu.Unlock()
 }
 
-func (c *Client) resolvePending(requestID uint64, result requestResult) {
+func (c *Client) resolvePending(requestID uint64, result requestResult) bool {
 	c.pendingMu.Lock()
 	ch, ok := c.pending[requestID]
 	c.pendingMu.Unlock()
 	if !ok {
-		return
+		return false
 	}
 	select {
 	case ch <- result:
 	default:
 	}
+	return true
 }
 
 func (c *Client) failAllPending(err error) {
@@ -1578,6 +1654,57 @@ func (c *Client) failAllPending(err error) {
 		case ch <- requestResult{err: err}:
 		default:
 		}
+	}
+}
+
+func (c *Client) registerStreamSend(requestID uint64, metadata StreamSendMetadata) error {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	if c.closed {
+		return ErrClosed
+	}
+
+	c.streamSendMu.Lock()
+	defer c.streamSendMu.Unlock()
+	if len(c.streamSendPending) >= c.cfg.StreamSendPendingLimit {
+		return ErrStreamSendPendingFull
+	}
+	c.streamSendPending[requestID] = metadata
+	return nil
+}
+
+func (c *Client) takeStreamSend(requestID uint64) (StreamSendMetadata, bool) {
+	c.streamSendMu.Lock()
+	defer c.streamSendMu.Unlock()
+	metadata, ok := c.streamSendPending[requestID]
+	if ok {
+		delete(c.streamSendPending, requestID)
+	}
+	return metadata, ok
+}
+
+func (c *Client) completeStreamSend(requestID uint64, err error) {
+	metadata, ok := c.takeStreamSend(requestID)
+	if !ok {
+		return
+	}
+	c.notifyStreamSend(StreamSendResult{RequestID: requestID, Metadata: metadata, Err: err})
+}
+
+func (c *Client) failAllStreamSends(err error) {
+	c.streamSendMu.Lock()
+	pending := c.streamSendPending
+	c.streamSendPending = make(map[uint64]StreamSendMetadata)
+	c.streamSendMu.Unlock()
+
+	for requestID, metadata := range pending {
+		c.notifyStreamSend(StreamSendResult{RequestID: requestID, Metadata: metadata, Err: err})
+	}
+}
+
+func (c *Client) notifyStreamSend(result StreamSendResult) {
+	if handler, ok := c.cfg.Handler.(StreamSendHandler); ok {
+		handler.OnStreamSendResult(c.ctx, result)
 	}
 }
 

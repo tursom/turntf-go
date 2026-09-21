@@ -17,11 +17,27 @@ const (
 var streamMagic = [4]byte{'T', 'T', 'S', 1}
 
 var (
-	ErrStreamWindowFull = errors.New("stream send window is full")
-	ErrStreamGap        = errors.New("stream data offset has a gap")
-	ErrStreamEpoch      = errors.New("stream path epoch is stale or not resumed")
-	ErrStreamCredit     = errors.New("stream receive window exceeded")
+	ErrStreamWindowFull      = errors.New("stream send window is full")
+	ErrStreamGap             = errors.New("stream data offset has a gap")
+	ErrStreamEpoch           = errors.New("stream path epoch is stale or not resumed")
+	ErrStreamCredit          = errors.New("stream receive window exceeded")
+	ErrStreamSendPendingFull = errors.New("tracked stream send pending limit reached")
 )
+
+// StreamSendMetadata identifies the stream frame associated with a tracked send.
+type StreamSendMetadata struct {
+	Target        UserRef
+	TargetSession SessionRef
+	StreamID      StreamID
+	Kind          StreamFrameKind
+}
+
+// StreamSendResult reports asynchronous completion of a tracked stream send.
+type StreamSendResult struct {
+	RequestID uint64
+	Metadata  StreamSendMetadata
+	Err       error
+}
 
 type StreamID [16]byte
 
