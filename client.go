@@ -554,6 +554,7 @@ func (c *Client) SendStreamFrameTracked(ctx context.Context, target UserRef, tar
 		TargetSession: targetSession,
 		StreamID:      frame.ID,
 		Kind:          frame.Kind,
+		Epoch:         frame.Epoch,
 	}
 	if err := c.registerStreamSend(requestID, metadata); err != nil {
 		return 0, err

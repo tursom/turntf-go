@@ -117,7 +117,7 @@ func TestSendStreamFrameTrackedCrossPeerSuccess(t *testing.T) {
 	if result.RequestID != requestID || result.Err != nil {
 		t.Fatalf("result = %+v, want request ID %d and nil error", result, requestID)
 	}
-	wantMetadata := StreamSendMetadata{Target: target, TargetSession: targetSession, StreamID: frame.ID, Kind: frame.Kind}
+	wantMetadata := StreamSendMetadata{Target: target, TargetSession: targetSession, StreamID: frame.ID, Kind: frame.Kind, Epoch: frame.Epoch}
 	if result.Metadata != wantMetadata {
 		t.Fatalf("metadata = %+v, want %+v", result.Metadata, wantMetadata)
 	}

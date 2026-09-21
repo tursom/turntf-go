@@ -30,6 +30,7 @@ type StreamSendMetadata struct {
 	TargetSession SessionRef
 	StreamID      StreamID
 	Kind          StreamFrameKind
+	Epoch         uint64
 }
 
 // StreamSendResult reports asynchronous completion of a tracked stream send.
