@@ -23,6 +23,21 @@ type failNextWriteConn struct {
 	failNext bool
 }
 
+type blockNextWriteConn struct {
+	net.Conn
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *blockNextWriteConn) Write(p []byte) (int, error) {
+	if c.armed.CompareAndSwap(true, false) {
+		close(c.entered)
+		<-c.release
+	}
+	return c.Conn.Write(p)
+}
+
 func (c *failNextWriteConn) arm() {
 	c.mu.Lock()
 	c.failNext = true
@@ -213,6 +228,226 @@ func TestInvalidateTransportIgnoresStaleConnection(t *testing.T) {
 
 	if client.conn != current || !client.authenticated || client.loginInfo.User.Username != "current" {
 		t.Fatalf("stale failure invalidated current transport: conn=%p authenticated=%v login=%+v", client.conn, client.authenticated, client.loginInfo)
+	}
+}
+
+func TestQueuedWritesRejectStaleTransportAfterReconnect(t *testing.T) {
+	const queued = 8
+	type receivedEnvelope struct {
+		generation int32
+		envelope   *pb.ClientEnvelope
+	}
+
+	var attempts atomic.Int32
+	received := make(chan receivedEnvelope, queued+4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		generation := attempts.Add(1)
+		for {
+			_, payload, err := conn.Read(context.Background())
+			if err != nil {
+				return
+			}
+			var env pb.ClientEnvelope
+			if err := proto.Unmarshal(payload, &env); err != nil {
+				t.Errorf("decode generation %d envelope: %v", generation, err)
+				return
+			}
+			received <- receivedEnvelope{generation: generation, envelope: &env}
+		}
+	}))
+	defer server.Close()
+
+	var oldSocket *blockNextWriteConn
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		oldSocket = &blockNextWriteConn{Conn: conn, entered: make(chan struct{}), release: make(chan struct{})}
+		return oldSocket, nil
+	}}
+	defer transport.CloseIdleConnections()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	oldConn, _, err := websocket.Dial(ctx, server.URL, &websocket.DialOptions{HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatalf("dial old websocket: %v", err)
+	}
+	defer oldConn.CloseNow()
+	newConn, _, err := websocket.Dial(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatalf("dial new websocket: %v", err)
+	}
+	defer newConn.CloseNow()
+
+	handler := &writeFailureHandler{
+		disconnects: make(chan error, 1),
+		streamSends: make(chan StreamSendResult, 2),
+	}
+	clientCtx, cancelClient := context.WithCancel(context.Background())
+	defer cancelClient()
+	client := &Client{
+		cfg: Config{
+			Handler:                handler,
+			RequestTimeout:         time.Second,
+			StreamSendPendingLimit: DefaultStreamSendPendingLimit,
+		},
+		ctx:               clientCtx,
+		conn:              oldConn,
+		authenticated:     true,
+		pending:           make(map[uint64]chan requestResult),
+		streamSendPending: make(map[uint64]StreamSendMetadata),
+	}
+
+	pingDone := make(chan error, 1)
+	go func() { pingDone <- client.Ping(ctx) }()
+	select {
+	case got := <-received:
+		if got.generation != 1 || got.envelope.GetPing() == nil {
+			t.Fatalf("old pending RPC reached generation %d as %T", got.generation, got.envelope.Body)
+		}
+	case <-ctx.Done():
+		t.Fatal("old pending RPC was not written")
+	}
+
+	streamRequestID, err := client.SendStreamFrameTracked(ctx, UserRef{NodeID: 4096, UserID: 2049}, SessionRef{}, StreamFrame{
+		Kind: StreamFrameData,
+		ID:   testStreamID(),
+	}, DeliveryModeBestEffort)
+	if err != nil {
+		t.Fatalf("write old tracked stream: %v", err)
+	}
+	select {
+	case got := <-received:
+		stream := got.envelope.GetStreamFrame()
+		if got.generation != 1 || stream == nil || stream.RequestId != streamRequestID {
+			t.Fatalf("old tracked stream reached generation %d as %T", got.generation, got.envelope.Body)
+		}
+	case <-ctx.Done():
+		t.Fatal("old tracked stream was not written")
+	}
+
+	oldSocket.armed.Store(true)
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- client.writeProtoOnTransport(ctx, oldConn, &pb.ClientEnvelope{Body: &pb.ClientEnvelope_Ping{
+			Ping: &pb.Ping{RequestId: 100},
+		}})
+	}()
+	select {
+	case <-oldSocket.entered:
+	case <-ctx.Done():
+		t.Fatal("first old transport write did not block")
+	}
+
+	queuedDone := make(chan error, queued)
+	for i := 0; i < queued; i++ {
+		requestID := uint64(200 + i)
+		go func() {
+			queuedDone <- client.writeProtoOnTransport(ctx, oldConn, &pb.ClientEnvelope{Body: &pb.ClientEnvelope_Ping{
+				Ping: &pb.Ping{RequestId: requestID},
+			}})
+		}()
+	}
+
+	client.stateMu.Lock()
+	client.conn = newConn
+	client.authenticated = true
+	client.stateMu.Unlock()
+	client.failAllPending(ErrDisconnected)
+	client.failAllStreamSends(ErrDisconnected)
+	close(oldSocket.release)
+
+	newWriteStarted := time.Now()
+	newWriteDone := make(chan error, 1)
+	go func() {
+		newWriteDone <- client.sendEnvelope(ctx, &pb.ClientEnvelope{Body: &pb.ClientEnvelope_Ping{
+			Ping: &pb.Ping{RequestId: 999},
+		}})
+	}()
+	select {
+	case err := <-newWriteDone:
+		if err != nil {
+			t.Fatalf("new transport write: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("new transport write starved behind stale queue")
+	}
+	if elapsed := time.Since(newWriteStarted); elapsed > 500*time.Millisecond {
+		t.Fatalf("new transport write starved behind stale queue for %v", elapsed)
+	}
+
+	if err := <-firstDone; err != nil {
+		t.Fatalf("in-flight old write: %v", err)
+	}
+	for i := 0; i < queued; i++ {
+		if err := <-queuedDone; !errors.Is(err, ErrDisconnected) {
+			t.Fatalf("queued old write %d = %v, want ErrDisconnected", i, err)
+		}
+	}
+
+	want := map[uint64]int32{100: 1, 999: 2}
+	for len(want) != 0 {
+		select {
+		case got := <-received:
+			ping := got.envelope.GetPing()
+			if ping == nil {
+				t.Fatalf("generation %d received non-Ping envelope", got.generation)
+			}
+			generation, ok := want[ping.RequestId]
+			if !ok {
+				t.Fatalf("stale queued request %d reached generation %d", ping.RequestId, got.generation)
+			}
+			if got.generation != generation {
+				t.Fatalf("request %d reached generation %d, want %d", ping.RequestId, got.generation, generation)
+			}
+			delete(want, ping.RequestId)
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for expected writes: %v", want)
+		}
+	}
+	select {
+	case got := <-received:
+		t.Fatalf("unexpected request %d reached generation %d", got.envelope.GetPing().GetRequestId(), got.generation)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	select {
+	case err := <-pingDone:
+		if !errors.Is(err, ErrDisconnected) {
+			t.Fatalf("pending RPC cleanup = %v, want ErrDisconnected", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("pending RPC was not cleaned")
+	}
+	client.pendingMu.Lock()
+	pendingCount := len(client.pending)
+	client.pendingMu.Unlock()
+	if pendingCount != 0 {
+		t.Fatalf("pending RPC entries = %d, want 0", pendingCount)
+	}
+	select {
+	case result := <-handler.streamSends:
+		if result.RequestID != streamRequestID || !errors.Is(result.Err, ErrDisconnected) {
+			t.Fatalf("tracked stream cleanup = %+v", result)
+		}
+	default:
+		t.Fatal("tracked stream was not cleaned")
+	}
+	select {
+	case result := <-handler.streamSends:
+		t.Fatalf("tracked stream was cleaned more than once: %+v", result)
+	default:
+	}
+	if len(client.streamSendPending) != 0 {
+		t.Fatalf("tracked stream pending entries = %d, want 0", len(client.streamSendPending))
 	}
 }
 

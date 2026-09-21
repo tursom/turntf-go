@@ -1533,15 +1533,16 @@ func (c *Client) sendEnvelopeOnTransport(ctx context.Context, env *pb.ClientEnve
 	c.stateMu.RLock()
 	conn := c.conn
 	closed := c.closed
+	authenticated := c.authenticated
 	c.stateMu.RUnlock()
 
 	if closed {
 		return nil, ErrClosed
 	}
-	if conn == nil {
+	if conn == nil || !authenticated {
 		return nil, ErrNotConnected
 	}
-	return conn, c.writeProto(ctx, conn, env)
+	return conn, c.writeProtoOnTransport(ctx, conn, env)
 }
 
 func (c *Client) writeProto(ctx context.Context, conn *websocket.Conn, msg proto.Message) error {
@@ -1554,6 +1555,35 @@ func (c *Client) writeProto(ctx context.Context, conn *websocket.Conn, msg proto
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	return c.writeProtoPayload(ctx, conn, payload)
+}
+
+func (c *Client) writeProtoOnTransport(ctx context.Context, conn *websocket.Conn, msg proto.Message) error {
+	payload, err := proto.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	// A transport can be replaced while this frame waits in the single-writer queue.
+	c.stateMu.RLock()
+	closed := c.closed
+	current := c.conn == conn && c.authenticated
+	c.stateMu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
+	if !current {
+		return ErrDisconnected
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.writeProtoPayload(ctx, conn, payload)
+}
+
+func (c *Client) writeProtoPayload(ctx context.Context, conn *websocket.Conn, payload []byte) error {
 	// websocket 会在写 context 取消时关闭整条连接。Relay 的异步 ACK
 	// 可能与会话关闭并发；单个 RPC 的取消不能终止共享连接上的帧写入。
 	// 开始写后只受客户端生命周期和独立写超时约束，RPC 等待仍使用调用方 ctx。

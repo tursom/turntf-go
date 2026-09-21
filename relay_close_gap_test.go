@@ -147,6 +147,7 @@ func TestCloseDeadlineDuringSocketWriteKeepsSharedWS(t *testing.T) {
 	}
 	defer client.cancel()
 	client.conn = ws
+	client.authenticated = true
 	c := newTestRelayConnection()
 	c.relay.client = client
 	c.remotePeer = UserRef{NodeID: 8192, UserID: 1}
